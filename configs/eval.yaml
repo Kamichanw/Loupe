@@ -1,0 +1,7 @@
+defaults:
+  - _self_
+  - dataset
+  - model
+
+batch_size: 256
+checkpoint_path: /gemini/code/loupe/results/2025-04-29/00-20-25/pe_lr=1e-5/checkpoints/loupe-epoch=0-val_loss=0.0167.ckpt

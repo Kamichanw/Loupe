@@ -1,0 +1,4 @@
+data_dir: /gemini/space/jyc/track1
+
+seed: 42
+num_workers: 2

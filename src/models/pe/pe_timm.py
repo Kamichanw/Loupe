@@ -1,0 +1,692 @@
+from collections import OrderedDict
+from functools import partial
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, Literal
+
+import torch
+import torch.nn as nn
+from torch import nn, Tensor, broadcast_tensors, einsum
+from torch.nn import functional as F
+from torch.nn import Module, ModuleList
+from torch.nn.init import constant_, xavier_normal_, xavier_uniform_
+from torch.nn.parameter import Parameter
+from torch.amp import autocast
+from torch.utils.checkpoint import checkpoint
+from torch import pi
+
+### Import timm layers
+from timm.layers import (
+    PatchEmbed,
+    Mlp,
+    DropPath,
+    AttentionPoolLatent,
+    RmsNorm,
+    PatchDropout,
+    SwiGLUPacked,
+    SwiGLU,
+    trunc_normal_,
+    lecun_normal_,
+    resample_patch_embed,
+    resample_abs_pos_embed,
+    use_fused_attn,
+    get_act_layer,
+    get_norm_layer,
+    LayerType,
+    LayerScale,
+)
+
+# from timm.layers import RotaryEmbeddingCat, RotaryEmbedding # not compatible
+from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
+
+from timm.models._builder import build_model_with_cfg
+from timm.models._features import feature_take_indices
+from timm.models._registry import generate_default_cfgs, register_model, register_model_deprecations
+
+
+__all__ = ['PE']
+
+
+######## PE Rope (Simplified) ########
+class RotaryEmbedding(Module):
+    def __init__(
+        self,
+        dim,
+        freqs_for: Union[Literal["lang"], Literal["pixel"], Literal["constant"]] = "lang",        
+        theta=10000,
+        max_freq=10,
+        num_freqs=1,
+        learned_freq=False,              
+        theta_rescale_factor=1.0,
+    ):
+        super().__init__()
+        # proposed by reddit user bloc97, to rescale rotary embeddings to longer sequence length without fine-tuning
+        # has some connection to NTK literature
+        # https://www.reddit.com/r/LocalLLaMA/comments/14lz7j5/ntkaware_scaled_rope_allows_llama_models_to_have/
+        theta *= theta_rescale_factor ** (dim / (dim - 2))
+        if freqs_for == "lang":
+            freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+        elif freqs_for == "pixel":
+            freqs = torch.linspace(1.0, max_freq / 2, dim // 2) * pi
+        elif freqs_for == "constant":
+            freqs = torch.ones(num_freqs).float()
+        self.freqs = nn.Parameter(freqs, requires_grad=learned_freq)
+
+    def forward(self, t: Tensor): #, seq_len=None, offset=0):
+        freqs = self.freqs
+        freqs = t.type(freqs.dtype).unsqueeze(-1) * freqs
+        freqs = freqs.repeat_interleave(2, dim=-1)
+        return freqs
+
+
+class Rope2D(Module):
+    def __init__(self, dim, grid_size, use_cls_token=False):
+        super().__init__()
+        self.dim = dim
+        self.use_cls_token = use_cls_token
+        self.grid_size = grid_size
+        self.rope = RotaryEmbedding(self.dim // 2)
+        self.init_tensors()
+        
+    def init_tensors(self):
+        self.update_grid(self.grid_size[0], self.grid_size[1])
+        
+    def update_grid(self, grid_h, grid_w):
+        if self.use_cls_token:
+            # +1 to leave space for the cls token to be (0, 0)
+            grid_y_range = torch.arange(grid_h) + 1
+            grid_x_range = torch.arange(grid_w) + 1
+        else:
+            grid_y_range = torch.arange(grid_h)
+            grid_x_range = torch.arange(grid_w)
+        freqs_y = self.rope(grid_y_range)[:, None].expand(grid_h, grid_w, -1)
+        freqs_x = self.rope(grid_x_range)[None, :].expand(grid_h, grid_w, -1)
+        freq = torch.cat([freqs_x, freqs_y], dim=-1).reshape(grid_h * grid_w, -1)
+
+        if self.use_cls_token:
+            freq = torch.cat([freq, torch.zeros(1, freq.shape[-1])], dim=0)
+
+        self.freq = Parameter(freq[None, ...]) # remark: using Parameter instead of tensor for device consistency
+
+    def rotate_half(self, x):
+        shape = x.shape 
+        x = x.view(shape[:-1] + (-1, 2))
+        x1, x2 = x[..., 0], x[..., 1]
+        x = torch.stack((-x2, x1), dim=-1)
+        return x.view(shape[:-1] + (-1,))
+    
+    def apply_rotary_emb(self, freqs, t):
+        start_index=0
+        scale=1.0
+        seq_dim=-2
+        dtype = t.dtype
+
+        if t.ndim == 3:
+            seq_len = t.shape[seq_dim]
+            freqs = freqs[-seq_len:]
+
+        rot_dim = freqs.shape[-1]
+        end_index = start_index + rot_dim
+
+        assert (
+            rot_dim <= t.shape[-1]
+        ), f"feature dimension {t.shape[-1]} is not of sufficient size to rotate in all the positions {rot_dim}"
+
+        t_left, t, t_right = (
+            t[..., :start_index],
+            t[..., start_index:end_index],
+            t[..., end_index:],
+        )
+        t = (t * freqs.cos() * scale) + (self.rotate_half(t) * freqs.sin() * scale)
+        out = torch.cat((t_left, t, t_right), dim=-1)
+
+        return out.type(dtype)
+
+    def forward(self, q, k):
+        # batch, heads, seq, dim = q.shape
+        q = self.apply_rotary_emb(self.freq[:, None, :, :], q)
+        k = self.apply_rotary_emb(self.freq[:, None, :, :], k)
+        return q, k
+
+
+######## PE Modules ########
+class AttentionPooling(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        num_probe: int = 1,
+        mlp_ratio: int = 4,
+        act_layer: Callable = nn.GELU,
+        norm_layer: Callable = nn.LayerNorm,
+    ):
+        super().__init__()
+
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+
+        assert self.embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+
+        self.probe = nn.Parameter(torch.randn(1, num_probe, self.embed_dim))
+        self.attn = nn.MultiheadAttention(self.embed_dim, self.num_heads, batch_first=True)
+
+        self.layernorm = norm_layer(embed_dim)
+        self.mlp_width = int(embed_dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            OrderedDict(
+                [
+                    ("c_fc", nn.Linear(self.embed_dim, self.mlp_width)),
+                    ("gelu", act_layer()),
+                    ("c_proj", nn.Linear(self.mlp_width, self.embed_dim)),
+                ]
+            )
+        )
+
+    def forward(self, x: torch.Tensor):
+        batch, _, _ = x.shape
+        q = self.probe.repeat((batch, 1, 1)).to(x.dtype)
+        x = self.attn(q, x, x, need_weights=False)[0]
+        x = x + self.mlp(self.layernorm(x))
+        return x
+
+
+class SelfAttention(nn.Module):
+    r"""
+    Implements sequence packed attention and RoPe
+    """
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        rope: Optional[nn.Module] = None,
+    ):
+        super(SelfAttention, self).__init__()
+        self.embed_dim = embed_dim
+
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+
+        # To make this compatibile with nn.MultiHeadAttention
+        self.in_proj_weight = Parameter(torch.empty(3 * embed_dim, embed_dim))
+        self.in_proj_bias = Parameter(torch.empty(3 * embed_dim))
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+
+        self.rope = rope
+        self.scale = self.head_dim ** (-0.5)
+
+    def init_tensors(self):
+        xavier_uniform_(self.in_proj_weight)
+        constant_(self.in_proj_bias, 0.0)
+        constant_(self.out_proj.bias, 0.0)
+
+    def forward(self, 
+            x: torch.Tensor,
+            attn_mask: Optional[torch.Tensor] = None,      
+        ):
+        batch, seq, embed_dim = x.shape
+        proj = F.linear(x, self.in_proj_weight, self.in_proj_bias)
+
+        # reshape to 3, E and not E, 3 is deliberate for better memory coalescing and keeping same order as chunk()
+        proj = proj.unflatten(-1, (3, embed_dim)).unsqueeze(0).transpose(0, -2).squeeze(-2).contiguous()
+        q, k, v = proj[0], proj[1], proj[2]
+
+        # Use "q_" so that we don't accidentally quit in pdb :)
+        q = q.view(batch, seq, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        k = k.view(batch, seq, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        v = v.view(batch, seq, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        if self.rope is not None:
+            q, k = self.rope(q, k)
+
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=self.scale)
+        attn = attn.permute(0, 2, 1, 3).contiguous().view(batch, seq, -1)
+
+        return F.linear(attn, self.out_proj.weight, self.out_proj.bias)
+
+
+class ResidualAttentionBlock(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_head: int,
+        mlp_ratio: float = 4.0,
+        ls_init_value: float = None,
+        act_layer: Callable = nn.GELU,
+        norm_layer: Callable = nn.LayerNorm,
+        drop_path: float = 0.0,
+        rope: Optional[nn.Module] = None,
+    ):
+        super().__init__()
+
+        if rope:
+            self.attn = SelfAttention(d_model, n_head, rope=rope)
+        else:
+            self.attn = nn.MultiheadAttention(d_model, n_head, batch_first=True)
+
+        self.ls_1 = LayerScale(d_model, ls_init_value) if ls_init_value is not None else nn.Identity()
+        self.ls_2 = LayerScale(d_model, ls_init_value) if ls_init_value is not None else nn.Identity()
+
+        self.ln_1 = norm_layer(d_model)
+        self.ln_2 = norm_layer(d_model)
+
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        mlp_width = int(d_model * mlp_ratio)
+        self.mlp = nn.Sequential(
+            OrderedDict(
+                [
+                    ("c_fc", nn.Linear(d_model, mlp_width)),
+                    ("gelu", act_layer()),
+                    ("c_proj", nn.Linear(mlp_width, d_model)),
+                ]
+            )
+        )
+
+    def _call_attn(
+        self,
+        q_x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None
+    ):
+        if attn_mask is not None:
+            # Leave boolean masks as is
+            if not attn_mask.dtype == torch.bool:
+                attn_mask = attn_mask.to(q_x.dtype)
+
+        if isinstance(self.attn, SelfAttention):
+            return self.attn(q_x, attn_mask=attn_mask)
+        else:
+            return self.attn(q_x, q_x, q_x, attn_mask=attn_mask, need_weights=False)[0]
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,        
+    ):
+        x = x + self.drop_path1(self.ls_1(self._call_attn(self.ln_1(x), attn_mask=attn_mask)))
+        x = x + self.drop_path2(self.ls_2(self.mlp(self.ln_2(x))))
+        return x
+
+
+class Transformer(nn.Module):
+    def __init__(
+        self,
+        width: int,
+        layers: int,
+        heads: int,
+        mlp_ratio: float = 4.0,
+        ls_init_value: float = None,
+        act_layer: Callable = nn.GELU,
+        norm_layer: Callable = nn.LayerNorm,
+        drop_path: float = 0.0,
+        rope: Optional[nn.Module] = None,
+    ):
+        super().__init__()
+        self.width = width
+        self.layers = layers
+        self.grad_checkpointing = False
+
+        self.resblocks = nn.ModuleList(
+            [
+                ResidualAttentionBlock(
+                    width,
+                    heads,
+                    mlp_ratio,
+                    ls_init_value=ls_init_value,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                    drop_path=drop_path,
+                    rope=rope,
+                )
+                for _ in range(layers)
+            ]
+        )
+
+    @torch.jit.ignore
+    def set_grad_checkpointing(self, enable=True):
+        self.grad_checkpointing = enable
+
+    @torch.jit.ignore
+    def truncate(self, layer_idx: int):
+        """Delete layers so the last layer is the given layer index."""
+        self.layers = ((self.layers + layer_idx) % self.layers) + 1
+        self.resblocks = nn.ModuleList(self.resblocks[: self.layers])
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,        
+        # layer_idx=-1, #: int = -1, # torchscript emits iterations over modules as unrolled loops. so dynamic layer_idx is not supported as in orig pe
+    ):
+        #stop_idx = (self.layers + layer_idx) % self.layers
+        for i, r in enumerate(self.resblocks):
+            if self.grad_checkpointing and not torch.jit.is_scripting():
+                # TODO: handle kwargs https://github.com/pytorch/pytorch/issues/79887#issuecomment-1161758372
+                x = checkpoint(r, x, None, None, attn_mask)
+            else:
+                x = r(x, attn_mask=attn_mask)
+            # if i == stop_idx:
+            #     break
+        return x
+
+
+class PE(nn.Module):
+    def __init__(
+        self,
+        patch_size: int,
+        width: int,
+        layers: int,
+        heads: int,
+        mlp_ratio: float,
+        act_layer: Callable = nn.GELU,
+        norm_layer: Callable = partial(nn.LayerNorm, eps=1e-5),
+        use_ln_pre: bool = True,
+        use_ln_post: bool = True,
+        ls_init_value: float = None,
+        drop_path: float = 0.0,
+        img_size: int = 448,  # Pretrain image size only; you can pass in any image size
+        use_abs_posemb: bool = True,
+        use_rope2d: bool = True,
+        use_cls_token: bool = False,
+        output_dim: Optional[int] = 1280,
+        attn_pooler_heads: int = 8,
+        pool_type: Literal["attn", "tok", "avg", "none"] = "attn",
+        num_classes: int = 0,  # no use for PE
+        in_chans: int = 3,
+    ):
+        super().__init__()
+        assert pool_type in ("attn", "tok", "avg", "none")
+        self.pool_type = pool_type
+        self.patch_size = patch_size
+
+        self.output_dim = output_dim or width
+        self.proj_dim = output_dim
+        self.heads = heads
+        self.width = width
+        self.layers = layers
+
+        self.use_abs_posemb = use_abs_posemb
+        self.use_cls_token = use_cls_token
+        self.use_rope2d = use_rope2d
+        if isinstance(img_size, (tuple, list)):
+            img_size = img_size[0]
+        self.img_size = img_size
+
+        self.conv1 = nn.Conv2d(
+            in_channels=3,
+            out_channels=width,
+            kernel_size=patch_size,
+            stride=patch_size,
+            bias=False,
+        )
+        self.rope = (
+            Rope2D(
+                dim=width // heads,
+                use_cls_token=self.use_cls_token,
+                grid_size = (img_size // patch_size, img_size // patch_size),
+            )
+            if self.use_rope2d
+            else None
+        )
+
+        self.ln_pre = norm_layer(width) if use_ln_pre else nn.Identity()
+        self.ln_post = norm_layer(self.width) if use_ln_post else nn.Identity()
+
+        self.transformer = Transformer(
+            width,
+            layers,
+            heads,
+            mlp_ratio,
+            ls_init_value=ls_init_value,
+            act_layer=act_layer,
+            norm_layer=norm_layer,
+            drop_path=drop_path,
+            rope=self.rope,
+        )
+
+        if pool_type == "attn":
+            self.attn_pool = AttentionPooling(
+                embed_dim=width,
+                num_heads=attn_pooler_heads,
+                act_layer=act_layer,
+                norm_layer=norm_layer,
+            )
+        else:
+            self.attn_pool = None
+
+        self.init_tensors()
+
+    def init_tensors(self):
+        def init_submodule_tensors(module):
+            for name, child in module.named_children():
+                if hasattr(child, "init_tensors"):
+                    # logger.debug(f"Initializing tensors for submodule: {name}")
+                    child.init_tensors()
+                init_submodule_tensors(child)
+
+        init_submodule_tensors(self)
+        self.rope.init_tensors()
+
+        # class embeddings and positional embeddings
+        init_scale = self.width**-0.5
+
+        if self.use_cls_token:
+            self.class_embedding = nn.Parameter(init_scale * torch.randn(self.width))
+
+        if self.use_abs_posemb:
+            self.posemb_grid_size = self.img_size // self.patch_size
+            self.positional_embedding = nn.Parameter(
+                init_scale * torch.randn(int(self.use_cls_token) + self.posemb_grid_size**2, self.width)
+            )
+
+        if self.proj_dim is not None:
+            self.proj = nn.Parameter(init_scale * torch.randn(self.width, self.proj_dim))
+
+    def truncate(self, layer_idx: int):
+        """Delete layers so the last layer is the given layer index."""
+        self.transformer.truncate(layer_idx)
+        self.layers = self.transformer.layers
+
+    @torch.jit.ignore
+    def set_grad_checkpointing(self, enable=True):
+        self.transformer.set_grad_checkpointing(enable=enable)
+
+    def _pool(self, x: torch.Tensor):
+        if self.pool_type == "tok":
+            return x[:, 0]
+        elif self.pool_type == "avg":
+            return x.mean(dim=1)
+        elif self.pool_type == "attn":
+            return self.attn_pool(x).squeeze(1)
+        elif self.pool_type == "none":
+            return x
+        else:
+            raise NotImplementedError
+
+    #def forward_features(self, x: torch.Tensor, norm: bool = False, layer_idx: int = -1, strip_cls_token: bool = False):
+    def forward_features(self, x: torch.Tensor, norm: bool = False, strip_cls_token: bool = False):
+        #: layer_idx = -1, # torchscript emits iterations over modules as unrolled loops. so dynamic layer_idx is not supported in timm as in orig pe
+        batch, _, h, w = x.shape
+
+        x = self.conv1(x)
+        x = x.permute(0, 2, 3, 1).reshape(batch, -1, self.width)
+
+        if self.use_cls_token:
+            x = torch.cat(
+                [self.class_embedding.view(1, 1, -1).expand(batch, -1, -1), x],
+                dim=1,
+            )
+
+        if self.use_abs_posemb:
+            x = x + self.positional_embedding[None, ...]
+
+        x = self.ln_pre(x)
+        x = self.transformer(x)
+
+        if norm:
+            x = self.ln_post(x)
+
+        if strip_cls_token and self.use_cls_token:
+            x = x[:, 1:, :]
+
+        return x
+
+    def forward(self, x: torch.Tensor, strip_cls_token: bool = False):
+        x = self.forward_features(x, norm=True, strip_cls_token=strip_cls_token)
+        x = self._pool(x)
+
+        if self.proj_dim is not None:
+            x = x @ self.proj
+
+        return x
+
+
+def checkpoint_filter_fn(
+    state_dict: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    state_dict = state_dict.get('model', state_dict)
+    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    if any(k.startswith("visual.") for k in state_dict):
+        state_dict = {k.replace("visual.", ""): v for k, v in state_dict.items() if "visual" in k}
+    return state_dict
+
+
+######## PE Config ########
+def _cfg(url='', **kwargs):
+    return {
+        'license': 'apache-2.0',
+        'num_classes': 0,
+        'interpolation': 'bilinear',
+        'fixed_input_size': True,
+        'mean': IMAGENET_INCEPTION_MEAN, # (0.5, 0.5, 0.5)
+        'std': IMAGENET_INCEPTION_STD, # (0.5, 0.5, 0.5)
+        **kwargs,
+    }
+
+
+default_cfgs = generate_default_cfgs(
+    {
+        'vit_pe_core_base_patch16_224': _cfg(hf_hub_id='timm/', input_size=(3, 224, 224)),
+        'vit_pe_core_large_patch14_336': _cfg(hf_hub_id='timm/', input_size=(3, 336, 336)),
+        'vit_pe_core_gigantic_patch14_448': _cfg(hf_hub_id='timm/', input_size=(3, 448, 448)),
+        'vit_pe_lang_large_patch14_448': _cfg(hf_hub_id='timm/', input_size=(3, 448, 448)),
+        'vit_pe_lang_gigantic_patch14_448': _cfg(hf_hub_id='timm/', input_size=(3, 448, 448)),
+        'vit_pe_spatial_gigantic_patch14_448': _cfg(hf_hub_id='timm/', input_size=(3, 448, 448)),
+    }
+)
+
+
+def _create_pe(variant: str, pretrained: bool = False, **kwargs) -> PE:
+    out_indices = kwargs.pop('out_indices', 3)
+    return build_model_with_cfg(
+        PE,
+        variant,
+        pretrained,
+        pretrained_filter_fn=checkpoint_filter_fn,
+        pretrained_strict=False, 
+        # Remakr: strict=False since original pretrained models don't have rope freqs in nn.modules and samples rope on-the-fly w/ dynamic grid
+        # torchscript/timm doesn't support dynamic grid so sample once during model init without overwritten by ckpt loading.
+        feature_cfg=dict(out_indices=out_indices, feature_cls='getter'),
+        **kwargs,
+    )
+
+
+@register_model
+def vit_pe_core_base_patch16_224(pretrained=False, **kwargs):
+    model_args = dict(
+        img_size=224,
+        patch_size=16,
+        width=768,
+        layers=12,
+        heads=12,
+        mlp_ratio=4.0,
+        output_dim=1024,
+        use_cls_token=True,
+        pool_type='attn',
+    )
+    return _create_pe('vit_pe_core_base_patch16_224', pretrained=pretrained, **dict(model_args, **kwargs))
+
+
+@register_model
+def vit_pe_core_large_patch14_336(pretrained=False, **kwargs):
+    model_args = dict(
+        img_size=336,
+        patch_size=14,
+        width=1024,
+        layers=24,
+        heads=16,
+        mlp_ratio=4.0,
+        output_dim=1024,
+        use_cls_token=True,
+        pool_type='attn',
+    )
+    return _create_pe('vit_pe_core_large_patch14_336', pretrained=pretrained, **dict(model_args, **kwargs))
+
+
+@register_model
+def vit_pe_core_gigantic_patch14_448(pretrained=False, **kwargs):
+    model_args = dict(
+        img_size=448,
+        patch_size=14,
+        width=1536,
+        layers=50,
+        heads=16,
+        mlp_ratio=8960 / 1536,
+        output_dim=1280,
+        use_cls_token=False,
+        pool_type='attn',
+    )
+    return _create_pe('vit_pe_core_gigantic_patch14_448', pretrained=pretrained, **dict(model_args, **kwargs))
+
+
+@register_model
+def vit_pe_lang_large_patch14_448(pretrained=False, **kwargs):
+    model_args = dict(
+        img_size=448,
+        patch_size=14,
+        width=1024,
+        layers=23,
+        heads=16,
+        mlp_ratio=4.0,
+        output_dim=None,
+        use_cls_token=True,
+        use_ln_post=False,
+        pool_type='none',
+        ls_init_value=0.1,
+    )
+    return _create_pe('vit_pe_lang_large_patch14_448', pretrained=pretrained, **dict(model_args, **kwargs))
+
+
+@register_model
+def vit_pe_lang_gigantic_patch14_448(pretrained=False, **kwargs):
+    model_args = dict(
+        img_size=448,
+        patch_size=14,
+        width=1536,
+        layers=47,
+        heads=16,
+        mlp_ratio=8960 / 1536,
+        output_dim=None,
+        use_cls_token=False,
+        use_ln_post=False,
+        pool_type='none',
+        ls_init_value=0.1,
+    )
+    return _create_pe('vit_pe_lang_gigantic_patch14_448', pretrained=pretrained, **dict(model_args, **kwargs))
+
+
+@register_model
+def vit_pe_spatial_gigantic_patch14_448(pretrained=False, **kwargs):
+    model_args = dict(
+        img_size=448,
+        patch_size=14,
+        width=1536,
+        layers=50,
+        heads=16,
+        mlp_ratio=8960 / 1536,
+        output_dim=None,
+        use_cls_token=False,
+        use_ln_post=False,
+        pool_type='none',
+        ls_init_value=0.1,
+    )
+    return _create_pe('vit_pe_spatial_gigantic_patch14_448', pretrained=pretrained, **dict(model_args, **kwargs))

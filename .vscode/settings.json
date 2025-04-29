@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./perception_models",
+        "./src",
+    ],
+}
