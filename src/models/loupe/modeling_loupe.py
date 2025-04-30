@@ -1,4 +1,7 @@
 from dataclasses import asdict
+import os
+from loguru import logger
+import timm
 import torch
 import torch.nn as nn
 
@@ -10,6 +13,7 @@ from transformers.models.mask2former import Mask2FormerForUniversalSegmentation
 
 from models.loupe.loss import LoupeLoss
 from models.loupe.configuration_loupe import LoupeConfig
+from models.pe import VisionTransformer
 
 
 class LoupeClassifier(nn.Module):
@@ -63,12 +67,63 @@ class LoupeClassifier(nn.Module):
 class FuseHead(nn.Module):
     def __init__(self, config: LoupeConfig) -> None:
         super().__init__()
-        use_cls_token = config.pe_vision_config.use_cls_token
+        use_cls_token = config.backbone_config.use_cls_token
         num_patches = (config.image_size // config.patch_size) ** 2
         self.fuse = nn.Linear(use_cls_token + num_patches, 1, bias=False)
 
     def forward(self, x):
         x = self.fuse(x)
+        return x
+
+
+class ScaleBlock(nn.Module):
+    """
+    Upscale or downscale the input feature map 2x times using nn.ConvTranspose2d or nn.Conv2d.
+    """
+
+    def __init__(self, embed_dim, conv1_layer=nn.ConvTranspose2d):
+        super().__init__()
+
+        self.conv1 = conv1_layer(
+            embed_dim,
+            embed_dim,
+            kernel_size=2,
+            stride=2,
+        )
+        self.act = nn.GELU()
+        self.conv2 = nn.Conv2d(
+            embed_dim,
+            embed_dim,
+            kernel_size=3,
+            padding=1,
+            groups=embed_dim,
+            bias=False,
+        )
+        self.norm = timm.layers.LayerNorm2d(embed_dim)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.act(x)
+        x = self.conv2(x)
+        x = self.norm(x)
+
+        return x
+
+
+class LoupeFeaturePyramid(nn.Module):
+    def __init__(self, scales: list[int] = None):
+        """
+        Initializes the LoupeFeaturePyramid with the given scales.
+
+        Args:
+            scales (list[int]): A list of integers representing the scales for the pyramid.
+                Should be powers of 2 in ascending order. Defaults to [1/2, 1, 2, 4].
+        """
+        super().__init__()
+        self.scales = scales or [1 / 2, 1, 2, 4]
+
+    def forward(self, x):
+
         return x
 
 
@@ -88,7 +143,7 @@ class LoupePreTrainedModel(PreTrainedModel):
 
     def _init_weights(self, module) -> None:
         """Initialize the weights"""
-        if isinstance(module, pe.VisionTransformer):
+        if isinstance(module, VisionTransformer):
             return
         elif isinstance(module, FuseHead):
             module.fuse.weight.data = nn.init.constant_(
@@ -111,28 +166,31 @@ class LoupeModel(LoupePreTrainedModel):
         super().__init__(config)
         self.config = config
         self.criterion = LoupeLoss()
-        self.pe_vision = pe.VisionTransformer(**asdict(config.pe_vision_config))
-        if config.pe_pretrained_path:
-            self.pe_vision.load_ckpt(config.pe_pretrained_path)
+        self.backbone = VisionTransformer(**asdict(config.backbone_config))
 
-        pe_output_dim = (
-            config.pe_vision_config.output_dim or config.pe_vision_config.width
+        backbone_output_dim = (
+            config.backbone_config.output_dim or config.backbone_config.width
         )
         self.classifier = LoupeClassifier(
-            input_dim=pe_output_dim,
+            input_dim=backbone_output_dim,
             hidden_dim=config.cls_mlp_hidden_size,
             num_layers=config.cls_mlp_layers,
             hidden_act=config.hidden_act,
         )
         if config.enable_patch_cls:
             self.patch_classifier = LoupeClassifier(
-                input_dim=config.pe_vision_config.width,
+                input_dim=config.backbone_config.width,
                 hidden_dim=config.cls_mlp_hidden_size,
                 num_layers=config.cls_mlp_layers,
                 hidden_act=config.hidden_act,
             )
             if config.enable_cls_fusion:
                 self.fuser = FuseHead(config)
+
+        self.post_init()
+        if config.pretrained_path:
+            logger.info(f"Loading pretrained weights from {config.pretrained_path}")
+            self.backbone.load_ckpt(config.pretrained_path)
 
     def cls_forward(
         self,
@@ -155,20 +213,20 @@ class LoupeModel(LoupePreTrainedModel):
         )
 
         # features: (batch_size, cls_token + num_patches, output_dim)
-        features = self.pe_vision.forward_features(pixel_values, norm=True)
+        features = self.backbone.forward_features(pixel_values, norm=True)
         patch_features = (
             features[:, 1:, :]
-            if self.config.pe_vision_config.use_cls_token
+            if self.config.backbone_config.use_cls_token
             else features
         )
-        output = self.pe_vision._pool(features)
+        output = self.backbone._pool(features)
 
         # regular classification
-        if self.config.pe_vision_config.pool_type in ["attn", "avg", "tok"]:
+        if self.config.backbone_config.pool_type in ["attn", "avg", "tok"]:
             # output: (batch_size, output_dim)
             global_logits = self.classifier(output)
         else:
-            if self.config.pe_vision_config.use_cls_token:
+            if self.config.backbone_config.use_cls_token:
                 # output: (batch_size, cls_token + num_patches, output_dim)
                 global_logits = self.classifier(output[:, 0, :])
             else:
@@ -203,7 +261,7 @@ class LoupeModel(LoupePreTrainedModel):
         return ImageClassifierOutputWithNoAttention(
             loss=loss, logits=logits, hidden_states=features
         )
-    
+
     def seg_forward(
         self,
         pixel_values: Optional[torch.Tensor] = None,
@@ -225,20 +283,20 @@ class LoupeModel(LoupePreTrainedModel):
         )
 
         # features: (batch_size, cls_token + num_patches, output_dim)
-        features = self.pe_vision.forward_features(pixel_values, norm=True)
+        features = self.backbone.forward_features(pixel_values, norm=True)
         patch_features = (
             features[:, 1:, :]
-            if self.config.pe_vision_config.use_cls_token
+            if self.config.backbone_config.use_cls_token
             else features
         )
-        output = self.pe_vision._pool(features)
+        output = self.backbone._pool(features)
 
         # regular classification
-        if self.config.pe_vision_config.pool_type in ["attn", "avg", "tok"]:
+        if self.config.backbone_config.pool_type in ["attn", "avg", "tok"]:
             # output: (batch_size, output_dim)
             global_logits = self.classifier(output)
         else:
-            if self.config.pe_vision_config.use_cls_token:
+            if self.config.backbone_config.use_cls_token:
                 # output: (batch_size, cls_token + num_patches, output_dim)
                 global_logits = self.classifier(output[:, 0, :])
             else:
@@ -251,6 +309,5 @@ class LoupeModel(LoupePreTrainedModel):
             patch_logits = self.patch_classifier(patch_features)
             if self.config.enable_cls_fusion:
                 logits = self.fuser(
-                    torch.cat([global_logits, patch_logits.squeeze
-                        (-1)], dim=1)
+                    torch.cat([global_logits, patch_logits.squeeze(-1)], dim=1)
                 )

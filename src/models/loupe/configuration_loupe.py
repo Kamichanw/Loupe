@@ -2,14 +2,15 @@ import json
 import os
 from transformers.configuration_utils import PretrainedConfig
 from loguru import logger
-
+from models.pe import PE_VISION_CONFIG, PEConfig
 
 class LoupeConfig(PretrainedConfig):
     model_type = "loupe"
 
     def __init__(
         self,
-        pe_pretrained_path: str = None,
+        backbone_name: str = "PE-Core-L14-336",
+        pretrained_path: str = None,
         hidden_act="gelu",
         hidden_dropout_prob=0.1,
         initializer_range=0.02,
@@ -37,22 +38,28 @@ class LoupeConfig(PretrainedConfig):
                 "enable_cls_fusion will be ignored."
             )
 
-        # pe_vision configs
-        if not os.path.exists(pe_pretrained_path) or not os.path.exists(
-            pe_pretrained_path + "/config.json"
-        ) or not os.path.exists(
-            pe_pretrained_path + "/model.safetensors"
-        ):
-            raise FileNotFoundError(
-                f"One of pe_pretrained_path {pe_pretrained_path}, config.json, model.safetensors does not exist. "
-                "Please make sure you've downloaded checkpoints from https://huggingface.co/facebook/vit_pe_core_large_patch14_336_timm."
+        # backbone configs
+        if all(backbone_name not in name for name in self.supported_backbone):
+            raise NotImplementedError(
+                f"Backbone {backbone_name} is not supported. "
+                f"Please choose from {self.supported_backbone}."
             )
-        with open(pe_pretrained_path + "/config.json", "r") as f:
-            self.pe_vision_config = json.load(f)
-        self.pe_pretrained_path = pe_pretrained_path
 
+        self.backbone_config: PEConfig = PE_VISION_CONFIG[backbone_name]
+        self.backbone_config.output_dim = None # we use our own linear projection
+        self.pretrained_path = pretrained_path
+        self.backbone_name = backbone_name
 
         # remaining configs
-        self.hidden_size = self.pe_vision_config.width
-        self.patch_size = self.pe_vision_config.patch_size
-        self.image_size = self.pe_vision_config.image_size
+        self.hidden_size = self.backbone_config.width
+        self.patch_size = self.backbone_config.patch_size
+        self.image_size = self.backbone_config.image_size
+
+    @property
+    def supported_backbone(self):
+        supported_backbones = [
+            "PE-Core-L16-224",
+            "PE-Core-L14-336",
+            "PE-Core-G14-448",
+        ]
+        return supported_backbones

@@ -1,11 +1,11 @@
 model_config:
   _target_: "src.models.loupe.LoupeConfig"
-  pe_pretrained_path: /gemini/code/loupe/pretrained_weights/pe_timm
+  backbone_name: PE-Core-L14-336
+  pretrained_path: /gemini/code/loupe/pretrained_weights/pe/PE-Core-L14-336.pt
   hidden_act: "gelu"
   hidden_dropout_prob: 0.1
   initializer_range: 0.02
-  pe_vision_config: "PE-Core-L14-336"
   cls_mlp_hidden_size: 2048 # 2 times of Perception Encoder hidden dim
-  cls_mlp_layers: 1
+  cls_mlp_layers: 2
   enable_patch_cls: True
   enable_cls_fusion: True

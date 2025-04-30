@@ -26,7 +26,7 @@ class LitModel(pl.LightningModule):
         self.test_outputs = []
 
         if not self.cfg.get("pe_lr", False):
-            for name, param in self.loupe.pe_vision.named_parameters():
+            for name, param in self.loupe.backbone.named_parameters():
                 param.requires_grad = False
 
     def forward(

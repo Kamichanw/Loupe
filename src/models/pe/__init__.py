@@ -1,1 +1,1 @@
-from .pe_timm import *
+from .pe import *

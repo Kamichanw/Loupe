@@ -18,9 +18,8 @@ class DataModule(pl.LightningDataModule):
 
     def setup(self, stage: str) -> None:
         dataset = load_dataset("parquet", data_dir=self.cfg.data_dir)
-        if stage == "fit" or stage is None:
+        if stage in [None, "validate", "fit"]:
             self.trainset = dataset["train"]
-        elif stage == "validate":
             # use a small subset to prevent too long validation time
             self.validset = (
                 dataset["validation"].shuffle(seed=self.cfg.seed).select(range(5000))
