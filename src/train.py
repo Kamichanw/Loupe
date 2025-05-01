@@ -13,7 +13,7 @@ from omegaconf import DictConfig
 from pathlib import Path
 
 
-from models.loupe import LoupeModel
+from models.loupe import LoupeModel, LoupeConfig
 from data_module import DataModule
 from lit_model import LitModel
 
@@ -48,7 +48,7 @@ def main(cfg: DictConfig):
         callbacks=[LearningRateMonitor(), RichProgressBar(), checkpoint_callback],
         # fast_dev_run=True,
         # devices=1,
-        max_epochs=cfg.epoch,
+        max_epochs=cfg.hparams.epoch,
         devices=len(
             os.environ.get(
                 "CUDA_VISIBLE_DEVICES",
@@ -63,7 +63,7 @@ def main(cfg: DictConfig):
         accumulate_grad_batches=cfg.hparams.accumulate_grad_batches,
     )
     torch.set_float32_matmul_precision("medium")
-    loupe_config = hydra.utils.instantiate(cfg.model.config)
+    loupe_config = LoupeConfig(**cfg.model)
     loupe = LoupeModel(loupe_config)
 
     model = LitModel(cfg, loupe)

@@ -1,5 +1,6 @@
 from typing import Optional
 
+from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
 import pytorch_lightning as pl
@@ -25,8 +26,8 @@ class LitModel(pl.LightningModule):
         self.val_outputs = []
         self.test_outputs = []
 
-        if self.cfg.hparams.get("backbone_lr", 0) and self.cfg.model.freeze_backbone:
-            raise ValueError(
+        if self.cfg.hparams.backbone_lr and self.cfg.model.freeze_backbone:
+            logger.warning(
                 "backbone_lr is set to a specific value, but freeze_backbone is set to True. "
                 "backbone_lr will be ignored."
             )
@@ -50,7 +51,7 @@ class LitModel(pl.LightningModule):
             patch_labels (Optional[torch.Tensor], optional): Patch labels with shape (N, num_patches, num_patches).
                 Only used if config.enable_patch_cls is True. Defaults to None.
         """
-        if self.cfg.stage == "cls":
+        if self.cfg.stage.name == "cls":
             cls_output = self.loupe.cls_forward(
                 pixel_values=images, labels=labels, patch_labels=patch_labels
             )
@@ -58,7 +59,7 @@ class LitModel(pl.LightningModule):
                 "loss": cls_output.loss,
                 "cls_logits": cls_output.logits,
             }
-        if self.cfg.stage == "seg":
+        if self.cfg.stage.name == "seg":
             seg_output = self.loupe.seg_forward(
                 pixel_values=images, masks=masks, labels=labels
             )
@@ -66,7 +67,7 @@ class LitModel(pl.LightningModule):
                 "loss": seg_output.loss,
                 "cls_logits": seg_output.logits,
             }
-        if self.cfg.stage == "test":
+        if self.cfg.stage.name == "test":
             cls_output = self.loupe.cls_forward(
                 pixel_values=images, labels=labels, patch_labels=None
             )
@@ -80,9 +81,10 @@ class LitModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         outputs = self.forward(**batch)
-        self.log_dict(outputs["loss"], sync_dist=True, prog_bar=True)
+        loss = outputs["loss"]
+        self.log("loss", loss.item(), sync_dist=True, prog_bar=True)
 
-        return outputs["loss"]
+        return loss
 
     def configure_optimizers(self):
         def filter_decay_params(param_dict, **common_args):
@@ -192,7 +194,7 @@ class LitModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         outputs = self(**batch)
-        loss = outputs["loss"]["all"]
+        loss = outputs["loss"]
         preds = torch.sigmoid(outputs["cls_logits"]).squeeze(-1)
         targets = batch["labels"]
         self.val_outputs.append(

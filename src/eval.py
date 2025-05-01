@@ -44,7 +44,7 @@ def main(cfg: DictConfig):
         log_every_n_steps=2,
     )
     torch.set_float32_matmul_precision("medium")
-    loupe_config = hydra.utils.instantiate(cfg.model.config)
+    loupe_config = hydra.utils.instantiate(cfg.model)
     loupe = LoupeModel(loupe_config)
 
     model = LitModel.load_from_checkpoint(

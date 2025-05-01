@@ -1,4 +1,4 @@
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import math
 import os
 from loguru import logger
@@ -28,7 +28,7 @@ from models.loupe.loss import LoupeClsLoss
 from models.loupe.configuration_loupe import LoupeConfig
 from models.pe import VisionTransformer
 
-
+@dataclass
 class LoupeClassificationOutput(ModelOutput):
     """
     Class for Loupe classification outputs.
@@ -36,17 +36,14 @@ class LoupeClassificationOutput(ModelOutput):
     Args:
         loss (`torch.FloatTensor` of shape `(1,)`, *optional*):
             The sum of the whole image classification loss and patch classiication (if labels are provided).
-        cls_logits (`torch.FloatTensor` of shape `(batch_size, 1)`, *optional*):
-            Classification logits (if labels are provided).
-        patch_logits (`torch.FloatTensor` of shape `(batch_size, num_patches, 1)`, *optional*):
-            Patch classification logits (if labels are provided).
+        logits (`torch.FloatTensor` of shape `(batch_size, 1)`, *optional*):
+            Classification logits of the model, may be fused with patch logits.
         last_hidden_states (`torch.FloatTensor` of shape `(batch_size, num_patches, hidden_dim)`, *optional*):
             Last hidden states of the model (if `output_hidden_states=True`).
     """
 
     loss: Optional[torch.FloatTensor] = None
-    cls_logits: Optional[torch.FloatTensor] = None
-    patch_logits: Optional[torch.FloatTensor] = None
+    logits: Optional[torch.FloatTensor] = None
     last_hidden_states: Optional[torch.FloatTensor] = None
 
 
@@ -101,9 +98,8 @@ class LoupeClassifier(nn.Module):
 class FuseHead(nn.Module):
     def __init__(self, config: LoupeConfig) -> None:
         super().__init__()
-        use_cls_token = config.backbone_config.use_cls_token
         num_patches = (config.image_size // config.patch_size) ** 2
-        self.fuse = nn.Linear(use_cls_token + num_patches, 1, bias=False)
+        self.fuse = nn.Linear(1 + num_patches, 1, bias=False)
 
     def forward(self, x):
         x = self.fuse(x)
@@ -429,20 +425,19 @@ class LoupeModel(LoupePreTrainedModel):
         if config.freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
-        
 
         if config.stage in ["cls", "test"]:
             backbone_output_dim = config.feature_size
             self.classifier = LoupeClassifier(
                 input_dim=backbone_output_dim,
-                hidden_dim=config.cls_mlp_hidden_size,
+                hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
                 num_layers=config.cls_mlp_layers,
                 hidden_act=config.hidden_act,
             )
             if config.enable_patch_cls:
                 self.patch_classifier = LoupeClassifier(
                     input_dim=config.backbone_config.width,
-                    hidden_dim=config.cls_mlp_hidden_size,
+                    hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
                     num_layers=config.cls_mlp_layers,
                     hidden_act=config.hidden_act,
                 )
@@ -520,24 +515,20 @@ class LoupeModel(LoupePreTrainedModel):
                 # regular cls loss will only be on the global logits
                 logits = global_logits
         else:
+            patch_logits = None
             logits = global_logits
         # logits: (batch_size, 1)
 
-        loss = (
-            self.cls_criterion(
-                cls_logits=logits,
-                cls_labels=labels,
-                patch_logits=patch_logits,
-                patch_labels=patch_labels,
-            )
-            if labels is not None
-            else None
+        loss = self.cls_criterion(
+            cls_logits=logits,
+            cls_labels=labels,
+            patch_logits=patch_logits,
+            patch_labels=patch_labels,
         )
 
         return LoupeClassificationOutput(
             loss=loss,
-            cls_logits=global_logits,
-            patch_logits=patch_logits,
+            logits=logits,
             last_hidden_states=features,
         )
 

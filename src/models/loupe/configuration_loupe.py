@@ -64,7 +64,8 @@ class LoupeConfig(PretrainedConfig):
         self.backbone_config.output_dim = None  # we use our own linear projection
         for key in backbone_overrides or {}:
             if hasattr(self.backbone_config, key):
-                setattr(self.backbone_config, key, backbone_overrides[key])
+                if getattr(self.backbone_config, key) is not None:
+                    setattr(self.backbone_config, key, backbone_overrides[key])
             else:
                 logger.warning(
                     f"Backbone config {key} is not supported. "
@@ -72,12 +73,6 @@ class LoupeConfig(PretrainedConfig):
                 )
         self.backbone_name = backbone_name
         self.backbone_path = backbone_path
-        self.feature_size = (
-            self.backbone_config.output_dim or self.backbone_config.width
-        )
-        self.feature_channels = [self.feature_size] * len(
-            self.fpn_scales
-        )  # for vit-like backbones, there is only one scale
 
         # loupe configs - classification
         self.cls_mlp_ratio = cls_mlp_ratio
@@ -101,6 +96,12 @@ class LoupeConfig(PretrainedConfig):
         self.hidden_size = self.backbone_config.width
         self.patch_size = self.backbone_config.patch_size
         self.image_size = self.backbone_config.image_size
+        self.feature_size = (
+            self.backbone_config.output_dim or self.backbone_config.width
+        )
+        self.feature_channels = [self.feature_size] * len(
+            self.fpn_scales
+        )  # for vit-like backbones, there is only one scale
 
         # mask2former configs
         overlay = mask2former_overrides or {}

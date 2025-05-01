@@ -3,7 +3,6 @@ defaults:
   - seg
   - _self_
 
-config:
-  freeze_backbone: True
-  freeze_cls: True
-  freeze_seg: True
+freeze_backbone: True
+freeze_cls: True
+freeze_seg: True
