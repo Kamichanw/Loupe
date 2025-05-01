@@ -70,15 +70,17 @@ class Poly1FocalLoss(nn.Module):
         return poly1
 
 
-class LoupeLoss(nn.Module):
+class LoupeClsLoss(nn.Module):
     def __init__(
         self,
         epsilon: float = 1.0,
         alpha: float = 0.9,
         gamma: float = 2.0,
     ):
-        super(LoupeLoss, self).__init__()
-        self.patch_wise_criterion = Poly1FocalLoss(epsilon=epsilon, alpha=alpha, gamma=gamma)
+        super(LoupeClsLoss, self).__init__()
+        self.patch_wise_criterion = Poly1FocalLoss(
+            epsilon=epsilon, alpha=alpha, gamma=gamma
+        )
         self.cls_criterion = nn.BCEWithLogitsLoss()
 
     def forward(

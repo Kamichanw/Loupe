@@ -23,7 +23,7 @@ project_root = Path(__file__).resolve().parent.parent
 
 @hydra.main(
     config_path=str(project_root / "configs"),
-    config_name="train.yaml",
+    config_name="base.yaml",
     version_base=None,
 )
 def main(cfg: DictConfig):
@@ -57,13 +57,13 @@ def main(cfg: DictConfig):
         ),
         strategy=cfg.strategy,
         precision=cfg.precision,
-        gradient_clip_val=cfg.grad_clip_val,
+        gradient_clip_val=cfg.hparams.grad_clip_val,
         val_check_interval=0.25,
         log_every_n_steps=2,
-        accumulate_grad_batches=cfg.accumulate_grad_batches,
+        accumulate_grad_batches=cfg.hparams.accumulate_grad_batches,
     )
     torch.set_float32_matmul_precision("medium")
-    loupe_config = hydra.utils.instantiate(cfg.model_config)
+    loupe_config = hydra.utils.instantiate(cfg.model.config)
     loupe = LoupeModel(loupe_config)
 
     model = LitModel(cfg, loupe)

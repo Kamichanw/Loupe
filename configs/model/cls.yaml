@@ -1,0 +1,13 @@
+defaults:
+  - default
+  - _self_
+
+config:
+  # loupe configs
+  cls_mlp_ratio: 2 # 2 times of Perception Encoder output dim
+  cls_mlp_layers: 2
+  enable_patch_cls: True
+  enable_cls_fusion: True
+
+  freeze_backbone: False
+  freeze_cls: False

@@ -1,0 +1,9 @@
+defaults:
+  - cls
+  - seg
+  - _self_
+
+config:
+  freeze_backbone: True
+  freeze_cls: True
+  freeze_seg: True

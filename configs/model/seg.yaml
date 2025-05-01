@@ -1,0 +1,16 @@
+defaults:
+  - default
+  - _self_
+
+config:
+  fpn_scales: [0.5, 2, 4] # rescale the last hidden states of backbone. for PE-Core-L14-336, rescale to 12x12, 48x48, 96x96
+  
+  freeze_backbone: False
+  freeze_seg: False
+
+  
+  mask2former_path: null
+  # mask2former overrides
+  mask2former_overrides:
+    num_queries: 10
+

@@ -23,12 +23,15 @@ project_root = Path(__file__).resolve().parent.parent
 
 @hydra.main(
     config_path=str(project_root / "configs"),
-    config_name="eval.yaml",
+    config_name="base.yaml",
     version_base=None,
 )
 def main(cfg: DictConfig):
     pl.seed_everything(cfg.seed)
     save_path = os.environ.get("CATTINO_TASK_HOME", f"{project_root}/results")
+
+    if cfg.stage.name != "test":
+        raise ValueError("This script is for testing only. Please use the test stage.")
 
     logger = TensorBoardLogger(
         save_dir=save_path,
@@ -41,7 +44,7 @@ def main(cfg: DictConfig):
         log_every_n_steps=2,
     )
     torch.set_float32_matmul_precision("medium")
-    loupe_config = hydra.utils.instantiate(cfg.model_config)
+    loupe_config = hydra.utils.instantiate(cfg.model.config)
     loupe = LoupeModel(loupe_config)
 
     model = LitModel.load_from_checkpoint(

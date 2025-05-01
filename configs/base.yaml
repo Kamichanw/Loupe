@@ -1,0 +1,11 @@
+defaults:
+  - _self_
+  - dataset
+  - stage: null # options: "cls" / "seg" / "test"
+  - model: ${stage}  
+  - hparams: ${stage} 
+
+seed: 42
+precision: 16-mixed
+strategy: deepspeed_stage_2_offload # options: "deepspeed_stage_2_offload" / "ddp"
+

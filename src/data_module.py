@@ -48,7 +48,7 @@ class DataModule(pl.LightningDataModule):
     def train_dataloader(self):
         return DataLoader(
             self.trainset,
-            batch_size=self.cfg.batch_size,
+            batch_size=self.cfg.hparams.batch_size,
             num_workers=self.cfg.num_workers,
             collate_fn=self.collate_fn,
             shuffle=True,
@@ -57,7 +57,7 @@ class DataModule(pl.LightningDataModule):
     def val_dataloader(self):
         return DataLoader(
             self.validset,
-            batch_size=self.cfg.batch_size,
+            batch_size=self.cfg.hparams.batch_size,
             num_workers=self.cfg.num_workers,
             collate_fn=self.collate_fn,
             shuffle=False,
@@ -66,7 +66,7 @@ class DataModule(pl.LightningDataModule):
     def test_dataloader(self):
         return DataLoader(
             self.testset,
-            batch_size=self.cfg.batch_size,
+            batch_size=self.cfg.hparams.batch_size,
             num_workers=self.cfg.num_workers,
             collate_fn=self.collate_fn,
             shuffle=False,

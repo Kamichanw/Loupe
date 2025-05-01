@@ -25,9 +25,11 @@ class LitModel(pl.LightningModule):
         self.val_outputs = []
         self.test_outputs = []
 
-        if not self.cfg.get("pe_lr", False):
-            for name, param in self.loupe.backbone.named_parameters():
-                param.requires_grad = False
+        if self.cfg.hparams.get("backbone_lr", 0) and self.cfg.model.freeze_backbone:
+            raise ValueError(
+                "backbone_lr is set to a specific value, but freeze_backbone is set to True. "
+                "backbone_lr will be ignored."
+            )
 
     def forward(
         self,
@@ -48,31 +50,39 @@ class LitModel(pl.LightningModule):
             patch_labels (Optional[torch.Tensor], optional): Patch labels with shape (N, num_patches, num_patches).
                 Only used if config.enable_patch_cls is True. Defaults to None.
         """
-
-        cls_output = self.loupe.cls_forward(
-            pixel_values=images, labels=labels, patch_labels=patch_labels
-        )
-        if "cls_loss_weight" in self.cfg:
-            # training stage
+        if self.cfg.stage == "cls":
+            cls_output = self.loupe.cls_forward(
+                pixel_values=images, labels=labels, patch_labels=patch_labels
+            )
             return {
-                "loss": {
-                    "all": self.cfg.cls_loss_weight * cls_output.loss,
-                    "cls_loss": cls_output.loss,
-                },
+                "loss": cls_output.loss,
                 "cls_logits": cls_output.logits,
             }
-        else:
-            # test stage
+        if self.cfg.stage == "seg":
+            seg_output = self.loupe.seg_forward(
+                pixel_values=images, masks=masks, labels=labels
+            )
+            return {
+                "loss": seg_output.loss,
+                "cls_logits": seg_output.logits,
+            }
+        if self.cfg.stage == "test":
+            cls_output = self.loupe.cls_forward(
+                pixel_values=images, labels=labels, patch_labels=None
+            )
+            seg_output = self.loupe.seg_forward(
+                pixel_values=images, masks=None, labels=labels
+            )
             return {
                 "cls_logits": cls_output.logits,
+                "seg_logits": seg_output.logits,
             }
 
     def training_step(self, batch, batch_idx):
         outputs = self.forward(**batch)
-        loss_dict = outputs["loss"]
-        self.log_dict(loss_dict, sync_dist=True, prog_bar=True)
+        self.log_dict(outputs["loss"], sync_dist=True, prog_bar=True)
 
-        return loss_dict["all"]
+        return outputs["loss"]
 
     def configure_optimizers(self):
         def filter_decay_params(param_dict, **common_args):
@@ -99,7 +109,7 @@ class LitModel(pl.LightningModule):
                         for name in non_decay_names
                         if name not in n
                     ],
-                    "weight_decay": self.cfg.weight_decay,
+                    "weight_decay": self.cfg.hparams.weight_decay,
                     **common_args,
                 }
             ]
@@ -109,9 +119,11 @@ class LitModel(pl.LightningModule):
         param_dict = {n: p for n, p in self.loupe.named_parameters() if p.requires_grad}
         optim_groups = []
 
-        if self.cfg.pe_lr:
-            pe_param_dict = {n: p for n, p in param_dict.items() if "pe_vision" in n}
-            pe_optim_groups = filter_decay_params(pe_param_dict, lr=self.cfg.pe_lr)
+        if self.cfg.hparams.backbone_lr:
+            pe_param_dict = {n: p for n, p in param_dict.items() if "backbone" in n}
+            pe_optim_groups = filter_decay_params(
+                pe_param_dict, lr=self.cfg.hparams.backbone_lr
+            )
             optim_groups.extend(pe_optim_groups)
 
             # filter out the parameters in pe_param_dict from param_dict
@@ -119,7 +131,7 @@ class LitModel(pl.LightningModule):
                 n: p for n, p in param_dict.items() if n not in pe_param_dict.keys()
             }
 
-        optim_groups.extend(filter_decay_params(param_dict, lr=self.cfg.lr))
+        optim_groups.extend(filter_decay_params(param_dict, lr=self.cfg.hparams.lr))
 
         assert any(
             group["params"] is not None for group in optim_groups if "params" in group
@@ -128,16 +140,16 @@ class LitModel(pl.LightningModule):
         if "deepspeed" in self.cfg.strategy:
             optimizer = DeepSpeedCPUAdam(
                 optim_groups,
-                weight_decay=self.cfg.weight_decay,
+                weight_decay=self.cfg.hparams.weight_decay,
             )
         else:
             optimizer = optim.AdamW(
                 optim_groups,
-                weight_decay=self.cfg.weight_decay,
+                weight_decay=self.cfg.hparams.weight_decay,
             )
 
         step_batches = self.trainer.estimated_stepping_batches
-        warmup_steps = self.cfg.warmup_step
+        warmup_steps = self.cfg.hparams.warmup_step
         if isinstance(warmup_steps, float):
             warm_steps = warmup_steps * step_batches
         elif isinstance(warmup_steps, int):
@@ -146,14 +158,14 @@ class LitModel(pl.LightningModule):
             raise ValueError(
                 f"the warm_steps should be int or float, but got {type(warmup_steps)}"
             )
-        if self.cfg.scheduler == "cosine":
+        if self.cfg.hparams.scheduler == "cosine":
             scheduler = get_cosine_schedule_with_warmup(
                 optimizer,
                 num_warmup_steps=warm_steps,
                 num_training_steps=step_batches,
             )
-        elif self.cfg.scheduler == "wsd":
-            decay_steps = self.cfg.decay_step
+        elif self.cfg.hparams.scheduler == "wsd":
+            decay_steps = self.cfg.hparams.decay_step
             if isinstance(decay_steps, float):
                 decay_steps = decay_steps * step_batches
             elif isinstance(decay_steps, int):
@@ -171,7 +183,7 @@ class LitModel(pl.LightningModule):
             )
         else:
             raise ValueError(
-                f"the scheduler should be cosine or wsd, but got {self.cfg.scheduler}"
+                f"the scheduler should be cosine or wsd, but got {self.cfg.hparams.scheduler}"
             )
         return {
             "optimizer": optimizer,
@@ -191,7 +203,7 @@ class LitModel(pl.LightningModule):
             }
         )
         return loss
-    
+
     def test_step(self, batch, batch_idx):
         outputs = self(**batch)
         preds = torch.sigmoid(outputs["cls_logits"]).squeeze(-1)
@@ -202,7 +214,7 @@ class LitModel(pl.LightningModule):
                 "targets": targets,
             }
         )
-    
+
     def on_test_epoch_end(self):
         preds = torch.cat([o["preds"] for o in self.test_outputs])
         targets = torch.cat([o["targets"] for o in self.test_outputs])
