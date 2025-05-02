@@ -63,7 +63,7 @@ def main(cfg: DictConfig):
         accumulate_grad_batches=cfg.hparams.accumulate_grad_batches,
     )
     torch.set_float32_matmul_precision("medium")
-    loupe_config = LoupeConfig(**cfg.model)
+    loupe_config = LoupeConfig(stage=cfg.stage.name, **cfg.model)
     loupe = LoupeModel(loupe_config)
 
     model = LitModel(cfg, loupe)

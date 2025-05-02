@@ -11,7 +11,7 @@ class LoupeConfig(PretrainedConfig):
 
     def __init__(
         self,
-        stage: Literal["cls", "seg", "test"] = "cls",
+        stage: Literal["cls", "seg", "cls_seg", "test"] = "cls",
         # basic configs
         hidden_act="gelu",
         hidden_dropout_prob=0.1,
@@ -37,9 +37,9 @@ class LoupeConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
         self.stage = stage
-        if stage not in ["cls", "seg", "test"]:
+        if stage not in ["cls", "seg", "cls_seg", "test"]:
             raise ValueError(
-                f"stage should be one of ['cls', 'seg', 'test'], but got {stage}."
+                f"stage should be one of ['cls', 'seg', 'cls_seg', 'test'], but got {stage}."
             )
 
         # basic configs
@@ -47,7 +47,9 @@ class LoupeConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.hidden_dropout_prob = hidden_dropout_prob
         self.checkpoint_path = checkpoint_path
-        if checkpoint_path is not None and (backbone_path is not None or mask2former_path is not None):
+        if checkpoint_path is not None and (
+            backbone_path is not None or mask2former_path is not None
+        ):
             logger.warning(
                 "checkpoint_path is set, but backbone_path or mask2former_path is also set. "
                 "backbone_path and mask2former_path will be ignored."
@@ -64,7 +66,7 @@ class LoupeConfig(PretrainedConfig):
         self.backbone_config.output_dim = None  # we use our own linear projection
         for key in backbone_overrides or {}:
             if hasattr(self.backbone_config, key):
-                if getattr(self.backbone_config, key) is not None:
+                if getattr(self.backbone_config, key) != '-':
                     setattr(self.backbone_config, key, backbone_overrides[key])
             else:
                 logger.warning(

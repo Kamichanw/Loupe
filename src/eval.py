@@ -13,7 +13,7 @@ from omegaconf import DictConfig
 from pathlib import Path
 
 
-from models.loupe import LoupeModel
+from models.loupe import LoupeModel, LoupeConfig
 from data_module import DataModule
 from lit_model import LitModel
 
@@ -44,7 +44,7 @@ def main(cfg: DictConfig):
         log_every_n_steps=2,
     )
     torch.set_float32_matmul_precision("medium")
-    loupe_config = hydra.utils.instantiate(cfg.model)
+    loupe_config = LoupeConfig(stage=cfg.stage.name, **cfg.model)
     loupe = LoupeModel(loupe_config)
 
     model = LitModel.load_from_checkpoint(

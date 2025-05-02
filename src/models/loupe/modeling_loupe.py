@@ -28,6 +28,7 @@ from models.loupe.loss import LoupeClsLoss
 from models.loupe.configuration_loupe import LoupeConfig
 from models.pe import VisionTransformer
 
+
 @dataclass
 class LoupeClassificationOutput(ModelOutput):
     """
@@ -55,10 +56,12 @@ class LoupeClassifier(nn.Module):
         hidden_dim: Optional[int] = None,
         num_layers: int = 2,
         hidden_act: Union[str, type] = "gelu",
+        initializer_range: float = 0.02,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_dim
         self.num_layers = num_layers
+        self.initializer_range = initializer_range
 
         if num_layers >= 2 and hidden_dim is None:
             raise ValueError(
@@ -87,6 +90,19 @@ class LoupeClassifier(nn.Module):
             )
         )
 
+    def init_tensors(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                # Upcast the input in `fp32` and cast it back to desired `dtype` to avoid
+                # `trunc_normal_cpu` not implemented in `half` issues
+                module.weight.data = nn.init.trunc_normal_(
+                    module.weight.data.to(torch.float32),
+                    mean=0.0,
+                    std=self.initializer_range,
+                ).to(module.weight.dtype)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
@@ -100,6 +116,11 @@ class FuseHead(nn.Module):
         super().__init__()
         num_patches = (config.image_size // config.patch_size) ** 2
         self.fuse = nn.Linear(1 + num_patches, 1, bias=False)
+
+    def init_tensors(self):
+        self.fuse.weight.data = nn.init.constant_(
+            self.fuse.weight.data, 1 / self.fuse.in_features
+        )
 
     def forward(self, x):
         x = self.fuse(x)
@@ -347,7 +368,7 @@ class LoupePreTrainedModel(PreTrainedModel):
         xavier_std = 1.0
         std = self.config.initializer_range
         if isinstance(module, (VisionTransformer, FuseHead, LoupeClassifier)):
-            return
+            module.init_tensors()
         elif isinstance(module, Mask2FormerTransformerModule):
             if module.input_projections is not None:
                 for input_projection in module.input_projections:
@@ -419,20 +440,18 @@ class LoupeModel(LoupePreTrainedModel):
 
         # init backbone
         self.backbone = VisionTransformer(**asdict(config.backbone_config))
-        if config.backbone_path:
-            logger.info(f"Loading pretrained weights from {config.backbone_path}")
-            self.backbone.load_ckpt(config.backbone_path)
         if config.freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
 
-        if config.stage in ["cls", "test"]:
+        if "test" in config.stage or "cls" in config.stage:
             backbone_output_dim = config.feature_size
             self.classifier = LoupeClassifier(
                 input_dim=backbone_output_dim,
                 hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
                 num_layers=config.cls_mlp_layers,
                 hidden_act=config.hidden_act,
+                initializer_range=config.initializer_range,
             )
             if config.enable_patch_cls:
                 self.patch_classifier = LoupeClassifier(
@@ -440,11 +459,11 @@ class LoupeModel(LoupePreTrainedModel):
                     hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
                     num_layers=config.cls_mlp_layers,
                     hidden_act=config.hidden_act,
+                    initializer_range=config.initializer_range,
                 )
                 if config.enable_cls_fusion:
                     self.fuser = FuseHead(config)
             self.cls_criterion = LoupeClsLoss()
-            # TODO: add load checkpoint
 
             if config.freeze_cls:
                 for param in self.classifier.parameters():
@@ -456,15 +475,18 @@ class LoupeModel(LoupePreTrainedModel):
                     for param in self.fuser.parameters():
                         param.requires_grad = False
 
-        if config.stage in ["seg", "test"]:
+        if "seg" in config.stage or "test" in config.stage:
             self.segmentor = LoupeSegmentor(config)
-            # TODO: add load checkpoint
 
             if config.freeze_seg:
                 for param in self.segmentor.parameters():
                     param.requires_grad = False
 
         self.post_init()
+
+        # load checkpoints
+        if config.backbone_path:
+            self.backbone.load_ckpt(config.backbone_path)
 
     def cls_forward(
         self,

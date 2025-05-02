@@ -1,6 +1,5 @@
 defaults:
-  - cls
-  - seg
+  - cls_seg
   - _self_
 
 freeze_backbone: True
