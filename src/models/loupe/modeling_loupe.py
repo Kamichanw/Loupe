@@ -56,12 +56,10 @@ class LoupeClassifier(nn.Module):
         hidden_dim: Optional[int] = None,
         num_layers: int = 2,
         hidden_act: Union[str, type] = "gelu",
-        initializer_range: float = 0.02,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_dim
         self.num_layers = num_layers
-        self.initializer_range = initializer_range
 
         if num_layers >= 2 and hidden_dim is None:
             raise ValueError(
@@ -91,17 +89,7 @@ class LoupeClassifier(nn.Module):
         )
 
     def init_tensors(self):
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                # Upcast the input in `fp32` and cast it back to desired `dtype` to avoid
-                # `trunc_normal_cpu` not implemented in `half` issues
-                module.weight.data = nn.init.trunc_normal_(
-                    module.weight.data.to(torch.float32),
-                    mean=0.0,
-                    std=self.initializer_range,
-                ).to(module.weight.dtype)
-                if module.bias is not None:
-                    module.bias.data.zero_()
+        pass
 
     def forward(self, x):
         for layer in self.layers:
@@ -451,7 +439,6 @@ class LoupeModel(LoupePreTrainedModel):
                 hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
                 num_layers=config.cls_mlp_layers,
                 hidden_act=config.hidden_act,
-                initializer_range=config.initializer_range,
             )
             if config.enable_patch_cls:
                 self.patch_classifier = LoupeClassifier(
@@ -459,7 +446,6 @@ class LoupeModel(LoupePreTrainedModel):
                     hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
                     num_layers=config.cls_mlp_layers,
                     hidden_act=config.hidden_act,
-                    initializer_range=config.initializer_range,
                 )
                 if config.enable_cls_fusion:
                     self.fuser = FuseHead(config)
