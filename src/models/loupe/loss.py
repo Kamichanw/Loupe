@@ -1,7 +1,10 @@
-from typing import Literal
+from typing import Dict, List, Literal, Optional
+from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from models.loupe.configuration_loupe import LoupeConfig
 
 
 # reference: https://github.com/abhuse/polyloss-pytorch/blob/main/polyloss.py
@@ -85,11 +88,10 @@ class LoupeClsLoss(nn.Module):
 
     def forward(
         self,
-        cls_logits=None,
-        cls_labels=None,
-        patch_logits=None,
-        patch_labels=None,
-        masks=None,
+        cls_logits: Optional[torch.Tensor] = None,
+        cls_labels: Optional[torch.Tensor] = None,
+        patch_logits: Optional[torch.Tensor] = None,
+        patch_labels: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -125,3 +127,29 @@ class LoupeClsLoss(nn.Module):
                 loss = patch_wise_loss
 
         return loss
+
+
+class LoupeSegLoss(Mask2FormerLoss):
+    def __init__(self, config: LoupeConfig):
+        self.weight_dict = {
+            "loss_cross_entropy": config.mask2former_config.class_weight,
+            "loss_mask": config.mask2former_config.mask_weight,
+            "loss_dice": config.mask2former_config.dice_weight,
+        }
+        super().__init__(config.mask2former_config, self.weight_dict)
+
+    def forward(
+        self,
+        masks_queries_logits: torch.Tensor,
+        class_queries_logits: torch.Tensor,
+        mask_labels: List[torch.Tensor],
+        class_labels: List[torch.Tensor],
+        auxiliary_predictions: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        return super().forward(
+            masks_queries_logits,
+            class_queries_logits,
+            mask_labels,
+            class_labels,
+            auxiliary_predictions=auxiliary_predictions,
+        )

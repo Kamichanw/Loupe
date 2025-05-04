@@ -332,7 +332,7 @@ class Rope2D:
 
             if self.use_cls_token:
                 freq = torch.cat(
-                    [freq, torch.zeros(1, freq.shape[-1], device=device)], dim=0
+                    [torch.zeros(1, freq.shape[-1], device=device), freq], dim=0
                 )
 
             self.freq = freq[None, ...]

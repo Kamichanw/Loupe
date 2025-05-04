@@ -31,6 +31,7 @@ class LoupeConfig(PretrainedConfig):
         # loupe configs - segmentation
         fpn_scales: list[int | float] = [0.5, 2, 4],
         freeze_seg=False,
+        cls_checkpoint_path: Optional[str] = None,
         mask2former_path: Optional[str] = None,
         mask2former_overrides: Optional[dict] = None,
         **kwargs,
@@ -66,7 +67,7 @@ class LoupeConfig(PretrainedConfig):
         self.backbone_config.output_dim = None  # we use our own linear projection
         for key in backbone_overrides or {}:
             if hasattr(self.backbone_config, key):
-                if getattr(self.backbone_config, key) != '-':
+                if getattr(self.backbone_config, key) != "-":
                     setattr(self.backbone_config, key, backbone_overrides[key])
             else:
                 logger.warning(
@@ -86,6 +87,7 @@ class LoupeConfig(PretrainedConfig):
 
         # loupe configs - segmentation
         self.fpn_scales = sorted(fpn_scales + [1])  # add 1x scale
+        self.cls_checkpoint_path = cls_checkpoint_path
         if enable_cls_fusion and not enable_patch_cls:
             logger.warning(
                 "enable_cls_fusion is set to True, but enable_patch_cls is set to False. "
@@ -106,7 +108,7 @@ class LoupeConfig(PretrainedConfig):
         )  # for vit-like backbones, there is only one scale
 
         # mask2former configs
-        overlay = mask2former_overrides or {}
+        overlay = {k: v for k, v in (mask2former_overrides or {}).items() if v != "-"}
         overlay = {
             **dict(
                 common_stride=self.patch_size,

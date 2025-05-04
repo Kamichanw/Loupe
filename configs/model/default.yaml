@@ -8,8 +8,11 @@ checkpoint_path: null # if set, backbone_path will be ignored
 backbone_name: PE-Core-L14-336
 backbone_path: /gemini/code/loupe/pretrained_weights/pe/PE-Core-L14-336.pt
 freeze_backbone: False
+# backbone overrides, you can set attr to '-' to use default value
 backbone_overrides:
-  output_dim: null
+  output_dim: null # set to null to use our own proj mlp
   # NOTE: pool_type of PE-Spatial-G14-448 is none
-  # but loupe requires a pool_type
-  # pool_type: "attn"
+  # but loupe requires a pool_type, specify it to "attn" / "tok"
+  # pool_type: "attn" / "tok"
+  pool_type: -
+  use_cls_token: -
