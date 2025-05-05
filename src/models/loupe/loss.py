@@ -1,10 +1,21 @@
-from typing import Dict, List, Literal, Optional
-from transformers.models.mask2former.modeling_mask2former import Mask2FormerLoss
+from typing import Dict, List, Literal, Optional, Tuple
+import numpy as np
+from transformers.models.mask2former.modeling_mask2former import (
+    Mask2FormerLoss,
+    pair_wise_dice_loss,
+    pair_wise_sigmoid_cross_entropy_loss,
+    Mask2FormerHungarianMatcher,
+    sample_point,
+)
+from transformers.utils import is_scipy_available
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from models.loupe.configuration_loupe import LoupeConfig
+
+if is_scipy_available():
+    from scipy.optimize import linear_sum_assignment
 
 
 # reference: https://github.com/abhuse/polyloss-pytorch/blob/main/polyloss.py
@@ -129,6 +140,109 @@ class LoupeClsLoss(nn.Module):
         return loss
 
 
+class LoupeHungarianMatcher(Mask2FormerHungarianMatcher):
+    def __init__(
+        self,
+        cost_class: float = 1.0,
+        cost_mask: float = 1.0,
+        cost_dice: float = 1.0,
+        num_points: int = 12544,
+    ):
+        super().__init__(
+            cost_class=cost_class,
+            cost_mask=cost_mask,
+            cost_dice=cost_dice,
+            num_points=num_points,
+        )
+
+    @torch.no_grad()
+    def forward(
+        self,
+        masks_queries_logits: torch.Tensor,
+        class_queries_logits: torch.Tensor,
+        mask_labels: torch.Tensor,
+        class_labels: torch.Tensor,
+    ) -> List[Tuple[torch.Tensor]]:
+        """
+        Params:
+            masks_queries_logits (`torch.Tensor`):
+                A tensor of dim `batch_size, num_queries, num_labels` with the classification logits.
+            class_queries_logits (`torch.Tensor`):
+                A tensor of dim `batch_size, num_queries, height, width` with the predicted masks.
+            class_labels (`torch.Tensor`):
+                A tensor of dim `num_target_boxes` (where num_target_boxes is the number of ground-truth objects in the
+                target) containing the class labels.
+            mask_labels (`torch.Tensor`):
+                A tensor of dim `num_target_boxes, height, width` containing the target masks.
+
+        Returns:
+            matched_indices (`List[Tuple[Tensor]]`): A list of size batch_size, containing tuples of (index_i, index_j)
+            where:
+                - index_i is the indices of the selected predictions (in order)
+                - index_j is the indices of the corresponding selected labels (in order)
+            For each batch element, it holds:
+                len(index_i) = len(index_j) = min(num_queries, num_target_boxes).
+        """
+        indices: List[Tuple[np.array]] = []
+
+        # iterate through batch size
+        batch_size = masks_queries_logits.shape[0]
+        for i in range(batch_size):
+            pred_probs = class_queries_logits[i].softmax(-1)
+            pred_mask = masks_queries_logits[i]
+
+            # Compute the classification cost. Contrary to the loss, we don't use the NLL, but approximate it in 1 - proba[target class]. The 1 is a constant that doesn't change the matching, it can be ommitted.
+            cost_class = -pred_probs[:, class_labels[i]]
+            target_mask = mask_labels[i].to(pred_mask)
+            target_mask = target_mask[:, None]
+            pred_mask = pred_mask[:, None]
+
+            # Sample ground truth and predicted masks
+            point_coordinates = torch.rand(
+                1, self.num_points, 2, device=pred_mask.device, dtype=pred_mask.dtype
+            )
+
+            target_coordinates = point_coordinates.repeat(target_mask.shape[0], 1, 1)
+            target_mask = sample_point(
+                target_mask, target_coordinates, align_corners=False
+            ).squeeze(1)
+
+            pred_coordinates = point_coordinates.repeat(pred_mask.shape[0], 1, 1)
+            pred_mask = sample_point(
+                pred_mask, pred_coordinates, align_corners=False
+            ).squeeze(1)
+
+            # compute the cross entropy loss between each mask pairs -> shape (num_queries, num_labels)
+            cost_mask = pair_wise_sigmoid_cross_entropy_loss(pred_mask, target_mask)
+            # Compute the dice loss betwen each mask pairs -> shape (num_queries, num_labels)
+            cost_dice = pair_wise_dice_loss(pred_mask, target_mask)
+            # final cost matrix
+            cost_matrix = (
+                self.cost_mask * cost_mask
+                + self.cost_class * cost_class
+                + self.cost_dice * cost_dice
+            )
+            # eliminate infinite values in cost_matrix to avoid the error ``ValueError: cost matrix is infeasible``
+            cost_matrix = torch.minimum(cost_matrix, torch.tensor(1e10))
+            cost_matrix = torch.maximum(cost_matrix, torch.tensor(-1e10))
+            cost_matrix = torch.nan_to_num(cost_matrix, 0)
+            # do the assigmented using the hungarian algorithm in scipy
+            assigned_indices: Tuple[np.array] = linear_sum_assignment(cost_matrix.cpu())
+            indices.append(assigned_indices)
+
+        # It could be stacked in one tensor
+        matched_indices = [
+            (
+                torch.as_tensor(i, dtype=torch.int64),
+                torch.as_tensor(j, dtype=torch.int64),
+            )
+            for i, j in indices
+        ]
+        return matched_indices
+
+
+# there are too many bugs in transformers implementation
+# so we have to rewrite the loss some parts
 class LoupeSegLoss(Mask2FormerLoss):
     def __init__(self, config: LoupeConfig):
         self.weight_dict = {
@@ -137,19 +251,79 @@ class LoupeSegLoss(Mask2FormerLoss):
             "loss_dice": config.mask2former_config.dice_weight,
         }
         super().__init__(config.mask2former_config, self.weight_dict)
-
-    def forward(
-        self,
-        masks_queries_logits: torch.Tensor,
-        class_queries_logits: torch.Tensor,
-        mask_labels: List[torch.Tensor],
-        class_labels: List[torch.Tensor],
-        auxiliary_predictions: Optional[Dict[str, torch.Tensor]] = None,
-    ) -> Dict[str, torch.Tensor]:
-        return super().forward(
-            masks_queries_logits,
-            class_queries_logits,
-            mask_labels,
-            class_labels,
-            auxiliary_predictions=auxiliary_predictions,
+        del self._modules["matcher"]
+        self.matcher = LoupeHungarianMatcher(
+            cost_mask=config.mask2former_config.mask_weight,
+            cost_dice=config.mask2former_config.dice_weight,
+            num_points=config.mask2former_config.train_num_points,
         )
+
+    def sample_points_using_uncertainty(
+        self,
+        logits: torch.Tensor,
+        uncertainty_function,
+        num_points: int,
+        oversample_ratio: int,
+        importance_sample_ratio: float,
+    ) -> torch.Tensor:
+        """
+        This function is meant for sampling points in [0, 1] * [0, 1] coordinate space based on their uncertainty. The
+        uncertainty is calculated for each point using the passed `uncertainty function` that takes points logit
+        prediction as input.
+
+        Args:
+            logits (`float`):
+                Logit predictions for P points.
+            uncertainty_function:
+                A function that takes logit predictions for P points and returns their uncertainties.
+            num_points (`int`):
+                The number of points P to sample.
+            oversample_ratio (`int`):
+                Oversampling parameter.
+            importance_sample_ratio (`float`):
+                Ratio of points that are sampled via importance sampling.
+
+        Returns:
+            point_coordinates (`torch.Tensor`):
+                Coordinates for P sampled points.
+        """
+
+        num_boxes = logits.shape[0]
+        num_points_sampled = int(num_points * oversample_ratio)
+
+        # Get random point coordinates
+        point_coordinates = torch.rand(
+            num_boxes, num_points_sampled, 2, device=logits.device, dtype=logits.dtype
+        )
+        # Get sampled prediction value for the point coordinates
+        point_logits = sample_point(logits, point_coordinates, align_corners=False)
+        # Calculate the uncertainties based on the sampled prediction values of the points
+        point_uncertainties = uncertainty_function(point_logits)
+
+        num_uncertain_points = int(importance_sample_ratio * num_points)
+        num_random_points = num_points - num_uncertain_points
+
+        idx = torch.topk(point_uncertainties[:, 0, :], k=num_uncertain_points, dim=1)[1]
+        shift = num_points_sampled * torch.arange(
+            num_boxes, dtype=torch.long, device=logits.device
+        )
+        idx += shift[:, None]
+        point_coordinates = point_coordinates.view(-1, 2)[idx.view(-1), :].view(
+            num_boxes, num_uncertain_points, 2
+        )
+
+        if num_random_points > 0:
+            point_coordinates = torch.cat(
+                [
+                    point_coordinates,
+                    torch.rand(
+                        num_boxes,
+                        num_random_points,
+                        2,
+                        device=logits.device,
+                        dtype=logits.dtype,
+                    ),
+                ],
+                dim=1,
+            )
+        return point_coordinates

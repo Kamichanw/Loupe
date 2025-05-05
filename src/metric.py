@@ -1,9 +1,9 @@
-from typing import Callable
+from typing import Callable, List
 import torch
 import numpy as np
 import os
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
-
+from torchmetrics.classification import BinaryJaccardIndex
 
 class Metric:
     def __init__(self, threshold=0.5):
@@ -41,21 +41,29 @@ class Metric:
         return acc
 
     def compute_iou(
-        self, preds: torch.Tensor, targets: torch.Tensor, threshold=None
+        self, preds: List[torch.Tensor], targets: List[torch.Tensor], threshold=None
     ) -> float:
+        """
+        Compute average IoU across a list of predicted and ground-truth masks.
+
+        Args:
+            preds (List[Tensor]): List of predicted masks, each of shape (H_i, W_i)
+            targets (List[Tensor]): List of ground-truth masks, each of shape (H_i, W_i)
+            threshold (float, optional): Threshold for binarizing predictions. Defaults to self.threshold.
+
+        Returns:
+            float: Average IoU score.
+        """
         threshold = self.threshold if threshold is None else threshold
-        preds = (preds > threshold).int()
-        targets = targets.int()
+        iou_scores = []
+        metric = BinaryJaccardIndex(threshold=threshold).to(preds[0].device)
+        for pred, target in zip(preds, targets):
+            pred_bin = (pred > threshold).int()
+            target_bin = target.int()
+            score = metric(pred_bin, target_bin)
+            iou_scores.append(score.item())
 
-        intersection = (preds & targets).sum().float()
-        union = (preds | targets).sum().float()
-
-        if union == 0:
-            iou = torch.tensor(1.0)
-        else:
-            iou = intersection / union
-
-        return iou.item()
+        return sum(iou_scores) / len(iou_scores) if iou_scores else 0.0
 
     def find_best_threshold(
         self,

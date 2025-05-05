@@ -27,17 +27,21 @@ class DataModule(pl.LightningDataModule):
         else:
             self.testset = dataset["validation"]
 
-    def collate_fn(self, batch):
+    def train_collate_fn(self, batch):
         images = self.processor.preprocess([x["image"].convert("RGB") for x in batch])
         masks = self.processor.preprocess_masks(
             [x["mask"].convert("L") if x["mask"] is not None else None for x in batch]
         )
-        labels = [x["mask"] is not None for x in batch]  # mask is None means it is real
+        class_labels = [
+            x["mask"] is not None for x in batch
+        ]  # mask is None means it is real
 
         return {
-            "images": torch.stack(images["pixel_values"]),  # (N, C, H, W)
-            "masks": torch.stack(masks["pixel_values"]),  # (N, H, W)
-            "labels": torch.tensor(labels, dtype=torch.long),  # (N,)
+            "pixel_values": torch.stack(images["pixel_values"]),  # (N, C, H, W)
+            "mask_labels": torch.stack(masks["pixel_values"]).squeeze(
+                1
+            ),  # (N, 1, H, W) -> (N, H, W)
+            "class_labels": torch.tensor(class_labels, dtype=torch.long),  # (N,)
             "patch_labels": (
                 torch.stack(masks["patch_labels"])  # (N, num_patches, num_patches)
                 if self.model_config.enable_patch_cls
@@ -50,16 +54,40 @@ class DataModule(pl.LightningDataModule):
             self.trainset,
             batch_size=self.cfg.hparams.batch_size,
             num_workers=self.cfg.num_workers,
-            collate_fn=self.collate_fn,
+            collate_fn=self.train_collate_fn,
             shuffle=True,
         )
+
+    def val_collate_fn(self, batch):
+        images = self.processor.preprocess([x["image"].convert("RGB") for x in batch])
+        masks = self.processor.preprocess_masks(
+            [x["mask"].convert("L") if x["mask"] is not None else None for x in batch],
+            return_patch_labels=False,
+        )
+        raw_masks = self.processor.preprocess_masks(
+            [x["mask"].convert("L") if x["mask"] is not None else None for x in batch],
+            return_patch_labels=False,
+            do_resize=False,
+        )
+        class_labels = [x["mask"] is not None for x in batch]
+
+        return {
+            "pixel_values": torch.stack(images["pixel_values"]),  # (N, C, H, W)
+            "mask_labels": torch.stack(masks["pixel_values"]).squeeze(
+                1
+            ),  # (N, 1, H, W) -> (N, H, W)
+            "class_labels": torch.tensor(class_labels, dtype=torch.long),  # (N,)
+            "masks": [
+                mask.squeeze(1) for mask in raw_masks["patch_labels"]
+            ],  # (N, H_i, W_i)
+        }
 
     def val_dataloader(self):
         return DataLoader(
             self.validset,
             batch_size=self.cfg.hparams.batch_size,
             num_workers=self.cfg.num_workers,
-            collate_fn=self.collate_fn,
+            collate_fn=self.val_collate_fn,
             shuffle=False,
         )
 
@@ -68,6 +96,6 @@ class DataModule(pl.LightningDataModule):
             self.testset,
             batch_size=self.cfg.hparams.batch_size,
             num_workers=self.cfg.num_workers,
-            collate_fn=self.collate_fn,
+            collate_fn=self.val_collate_fn,
             shuffle=False,
         )

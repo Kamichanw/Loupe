@@ -5,7 +5,7 @@ meow set shutdown-on-complete False
     python src/train.py \
     stage=cls \
     hparams.backbone_lr=null \
-    hparams.batch_size=256 \
+    hparams.batch_size=32 \
     hparams.accumulate_grad_batches=2 \
     model.freeze_backbone=True \
     model.backbone_path=pretrained_weights/pe-spatial/PE-Spatial-G14-448.pt \

@@ -14,6 +14,8 @@ from transformers import get_wsd_schedule, get_cosine_schedule_with_warmup
 
 from metric import Metric
 from models.loupe import LoupeModel
+from models.loupe.image_precessing_loupe import LoupeImageProcessor
+from models.loupe.modeling_loupe import LoupeUniversalOutput
 
 
 class LitModel(pl.LightningModule):
@@ -22,6 +24,7 @@ class LitModel(pl.LightningModule):
         self.cfg = cfg
         self.loupe = loupe
         self.model_config = loupe.config
+        self.processor = LoupeImageProcessor(self.model_config)
         self.metric = Metric()
         self.val_outputs = []
         self.test_outputs = []
@@ -34,57 +37,51 @@ class LitModel(pl.LightningModule):
 
     def forward(
         self,
-        images: torch.Tensor,
-        masks: torch.Tensor,
-        labels: torch.Tensor,
+        pixel_values: torch.Tensor,
+        mask_labels: torch.Tensor,
+        class_labels: torch.Tensor,
         patch_labels: Optional[torch.Tensor] = None,
     ):
         """
-
         Forward pass for the model.
 
         Args:
-            images (torch.Tensor): Input images with shape (N, C, H, W).
-            masks (torch.Tensor): Input masks with shape (N, H, W).
-            labels (torch.LongTensor): Labels with shape (N,), indicating whether the image is forgery.
+            pixel_values (torch.Tensor): Input images with shape (N, C, H, W).
+            mask_labels (torch.Tensor): Input masks with shape (N, H, W).
+            class_labels (torch.LongTensor): Labels with shape (N,), indicating whether the image is forgery.
                 False means real, True means fake.
             patch_labels (Optional[torch.Tensor], optional): Patch labels with shape (N, num_patches, num_patches).
                 Only used if config.enable_patch_cls is True. Defaults to None.
         """
-        if self.cfg.stage.name == "cls":
-            cls_output = self.loupe.cls_forward(
-                pixel_values=images, labels=labels, patch_labels=patch_labels
-            )
-            return {
-                "loss": cls_output.loss,
-                "cls_logits": cls_output.logits,
-            }
-        if self.cfg.stage.name == "seg":
-            seg_output = self.loupe.seg_forward(
-                pixel_values=images, masks=masks, labels=labels
-            )
-            return {
-                "loss": seg_output.loss,
-                "cls_logits": seg_output.logits,
-            }
-        if self.cfg.stage.name == "test":
-            cls_output = self.loupe.cls_forward(
-                pixel_values=images, labels=labels, patch_labels=None
-            )
-            seg_output = self.loupe.seg_forward(
-                pixel_values=images, masks=None, labels=labels
-            )
-            return {
-                "cls_logits": cls_output.logits,
-                "seg_logits": seg_output.logits,
-            }
+        output: LoupeUniversalOutput = self.loupe(
+            pixel_values,
+            mask_labels,
+            class_labels,
+            patch_labels=patch_labels,
+        )
+        loss_dict = {}
+        if output.cls_loss is not None:
+            loss_dict["loss"] = output.cls_loss
+            loss_dict["cls_loss"] = output.cls_loss
+        if output.seg_loss is not None:
+            if "loss" in loss_dict:
+                loss_dict["loss"] += output.seg_loss
+            else:
+                loss_dict["loss"] = output.seg_loss
+            loss_dict["seg_loss"] = output.seg_loss
+        return {
+            **loss_dict,
+            "cls_logits": output.cls_logits,
+            "class_queries_logits": output.class_queries_logits,
+            "masks_queries_logits": output.masks_queries_logits,
+        }
 
     def training_step(self, batch, batch_idx):
         outputs = self.forward(**batch)
-        loss = outputs["loss"]
-        self.log("loss", loss.item(), sync_dist=True, prog_bar=True)
+        loss_dict = {k: v for k, v in outputs.items() if "loss" in k}
+        self.log_dict(loss_dict, sync_dist=True, prog_bar=True)
 
-        return loss
+        return loss_dict["loss"]
 
     def configure_optimizers(self):
         def filter_decay_params(param_dict, **common_args):
@@ -193,18 +190,77 @@ class LitModel(pl.LightningModule):
         }
 
     def validation_step(self, batch, batch_idx):
+        masks = batch.pop("masks")
         outputs = self(**batch)
-        loss = outputs["loss"]
-        preds = torch.sigmoid(outputs["cls_logits"]).squeeze(-1)
-        targets = batch["labels"]
-        self.val_outputs.append(
-            {
-                "val_loss": loss,
-                "preds": preds,
-                "targets": targets,
-            }
+        val_output = {
+            "val_loss": outputs["loss"],
+        }
+        if "cls_loss" in outputs:
+            val_output.update(
+                {
+                    "val_cls_loss": outputs["cls_loss"],
+                    "cls_preds": torch.sigmoid(outputs["cls_logits"]).squeeze(-1),
+                    "cls_targets": batch["class_labels"],
+                }
+            )
+        if "seg_loss" in outputs:
+            target_sizes = [
+                (mask.shape[0], mask.shape[1]) for mask in masks
+            ]  # (H_i, W_i)
+            val_output.update(
+                {
+                    "val_seg_loss": outputs["seg_loss"],
+                    "seg_preds": self.processor.post_process_segmentation(
+                        outputs["class_queries_logits"],
+                        outputs["masks_queries_logits"],
+                        target_sizes=target_sizes,
+                    ),
+                    "seg_targets": masks,
+                }
+            )
+        self.val_outputs.append(val_output)
+        return outputs["loss"]
+
+    def on_validation_epoch_end(self):
+        metric_dict = {
+            "val_loss": torch.stack([o["val_loss"] for o in self.val_outputs]).mean()
+        }
+        if "val_cls_loss" in self.val_outputs[0]:
+            preds = torch.cat([o["cls_preds"] for o in self.val_outputs])
+            targets = torch.cat([o["cls_targets"] for o in self.val_outputs])
+            best_threshold_f1, best_f1 = self.metric.find_best_threshold(
+                self.metric.compute_f1, preds, targets
+            )
+            auc = self.metric.compute_auc(preds, targets)
+            metric_dict.update(
+                {
+                    "val_cls_loss": torch.stack(
+                        [o["val_cls_loss"] for o in self.val_outputs]
+                    ).mean(),
+                    "auc": auc,
+                    "f1": best_f1,
+                    "f1_thres": best_threshold_f1,
+                }
+            )
+        if "val_seg_loss" in self.val_outputs[0]:
+            preds = [p for o in self.val_outputs for p in o["seg_preds"]]
+            targets = [t for o in self.val_outputs for t in o["seg_targets"]]
+            iou = self.metric.compute_iou(preds, targets)
+            metric_dict.update(
+                {
+                    "val_seg_loss": torch.stack(
+                        [o["val_seg_loss"] for o in self.val_outputs]
+                    ).mean(),
+                    "iou": iou,
+                }
+            )
+
+        self.log_dict(
+            metric_dict,
+            prog_bar=True,
+            sync_dist=True,
         )
-        return loss
+        self.val_outputs.clear()
 
     def test_step(self, batch, batch_idx):
         outputs = self(**batch)
@@ -218,8 +274,8 @@ class LitModel(pl.LightningModule):
         )
 
     def on_test_epoch_end(self):
-        preds = torch.cat([o["preds"] for o in self.test_outputs])
-        targets = torch.cat([o["targets"] for o in self.test_outputs])
+        preds = torch.cat([o["cls_preds"] for o in self.test_outputs])
+        targets = torch.cat([o["cls_targets"] for o in self.test_outputs])
         best_threshold_f1, best_f1 = self.metric.find_best_threshold(
             self.metric.compute_f1, preds, targets
         )
@@ -229,21 +285,6 @@ class LitModel(pl.LightningModule):
         self.log("f1_thres", best_threshold_f1, prog_bar=True, sync_dist=True)
         self.log("auc", auc, prog_bar=True, sync_dist=True)
         self.test_outputs.clear()
-
-    def on_validation_epoch_end(self):
-        avg_loss = torch.stack([o["val_loss"] for o in self.val_outputs]).mean()
-        preds = torch.cat([o["preds"] for o in self.val_outputs])
-        targets = torch.cat([o["targets"] for o in self.val_outputs])
-        best_threshold_f1, best_f1 = self.metric.find_best_threshold(
-            self.metric.compute_f1, preds, targets
-        )
-        auc = self.metric.compute_auc(preds, targets)
-
-        self.log("val_loss", avg_loss, prog_bar=True, sync_dist=True)
-        self.log("f1", best_f1, prog_bar=True, sync_dist=True)
-        self.log("f1_thres", best_threshold_f1, prog_bar=True, sync_dist=True)
-        self.log("auc", auc, prog_bar=True, sync_dist=True)
-        self.val_outputs.clear()
 
     def on_save_checkpoint(self, checkpoint):
         full_state_dict = self.state_dict()

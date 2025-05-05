@@ -72,10 +72,11 @@ class LoupeSegmentationOutput(ModelOutput):
     class_queries_logits: Optional[torch.FloatTensor] = None
     auxiliary_logits: Optional[List[Dict[str, torch.Tensor]]] = None
 
+
 @dataclass
 class LoupeUniversalOutput(ModelOutput):
     """
-    
+
     Class for Loupe universal outputs.
 
     Args:
@@ -85,14 +86,19 @@ class LoupeUniversalOutput(ModelOutput):
             Classification logits from LoupeClassificationOutput.
         seg_loss (`torch.FloatTensor`, *optional*):
             The segmentation loss from LoupeSegmentationOutput.
-        seg_logits (`torch.FloatTensor`, *optional*):
-            Segmentation logits (masks_queries_logits) from LoupeSegmentationOutput.
+        class_queries_logits (`torch.FloatTensor`, *optional*):
+            A tensor of shape `(batch_size, num_queries, 1 + 1)` representing the proposed classes for each
+            query. Note the `+ 1` is needed because we incorporate the null class.
+        masks_queries_logits (`torch.FloatTensor`, *optional*):
+            A tensor of shape `(batch_size, num_queries, height, width)` representing the proposed masks for each
+            query.
     """
+
     cls_loss: Optional[torch.FloatTensor] = None
     cls_logits: Optional[torch.FloatTensor] = None
     seg_loss: Optional[torch.FloatTensor] = None
-    seg_logits: Optional[torch.FloatTensor] = None
-
+    class_queries_logits: Optional[torch.FloatTensor] = None
+    masks_queries_logits: Optional[torch.FloatTensor] = None
 
 
 class LoupeClassifier(nn.Module):
@@ -136,7 +142,8 @@ class LoupeClassifier(nn.Module):
         )
 
     def init_tensors(self):
-        pass
+        for layer in self.layers:
+            layer.reset_parameters()
 
     def forward(self, x):
         for layer in self.layers:
@@ -249,14 +256,24 @@ class LoupeSegmentor(nn.Module):
         super().__init__()
         self.config = config
         self.fpn = LoupeFeaturePyramid(config.backbone_config.width)
+        mask2former_config = config.mask2former_config
         self.pixel_decoder = Mask2FormerPixelDecoder(
-            config.mask2former_config, config.feature_channels
+            mask2former_config, config.feature_channels
         )
         self.mask2former_decoder = Mask2FormerTransformerModule(
-            in_features=config.feature_size, config=config.mask2former_config
+            in_features=config.feature_size, config=mask2former_config
         )
 
-        self.class_predictor = nn.Linear(config.mask2former_config.hidden_dim, 1)
+        # this is a bug of transformers library
+        # the input_projections should be a nn.ModuleList instead of a list
+        if isinstance(self.mask2former_decoder.input_projections, list):
+            self.mask2former_decoder.input_projections = nn.ModuleList(
+                self.mask2former_decoder.input_projections
+            )
+
+        self.class_predictor = nn.Linear(
+            mask2former_config.hidden_dim, mask2former_config.num_labels + 1
+        )
 
         self.criterion = LoupeSegLoss(config=config)
 
@@ -302,10 +319,12 @@ class LoupeSegmentor(nn.Module):
 
     def forward(
         self,
-        backbone_features: List[torch.Tensor],
+        features: torch.Tensor,
         mask_labels: Optional[torch.Tensor] = None,
         class_labels: Optional[torch.Tensor] = None,
     ):
+        # scale features to the different scales
+        backbone_features = self.fpn(features)
         pixel_decoder_output: Mask2FormerPixelDecoderOutput = self.pixel_decoder(
             backbone_features, output_hidden_states=False
         )
@@ -316,7 +335,6 @@ class LoupeSegmentor(nn.Module):
                 mask_features=pixel_decoder_output.mask_features,
                 output_hidden_states=self.config.mask2former_config.use_auxiliary_loss,
                 output_attentions=False,
-                return_dict=True,
             )
         )
 
@@ -377,15 +395,16 @@ class LoupePreTrainedModel(PreTrainedModel):
                         nn.init.constant_(input_projection.weight, 0.0)
                         nn.init.constant_(input_projection.bias, 0.0)
 
-            # Special case: level_embed is now a buffer, not a parameter
             if hasattr(module, "level_embed"):
-                with torch.no_grad():
-                    if is_zero_init:
-                        module.level_embed.fill_(0.0)  # Mean of 0.0 for zero_init test
-                    else:
-                        module.level_embed.fill_(1.0)  # Mean of 1.0 for normal case
+                if is_zero_init:
+                    nn.init.zeros_(
+                        module.level_embed.weight
+                    )  # Mean of 0.0 for zero_init test
+                else:
+                    nn.init.ones_(
+                        module.level_embed.weight
+                    )  # Mean of 1.0 for normal case
 
-            # Other embeddings use standard initialization with std=1.0
             if hasattr(module, "queries_embedder"):
                 # Use normal initialization with std=1.0
                 nn.init.normal_(module.queries_embedder.weight, mean=0.0, std=1.0)
@@ -469,7 +488,7 @@ class LoupeModel(LoupePreTrainedModel):
             if config.enable_patch_cls:
                 self.patch_classifier = LoupeClassifier(
                     input_dim=config.backbone_config.width,
-                    hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
+                    hidden_dim=config.backbone_config.width * config.cls_mlp_ratio,
                     num_layers=config.cls_mlp_layers,
                     hidden_act=config.hidden_act,
                 )
@@ -593,7 +612,7 @@ class LoupeModel(LoupePreTrainedModel):
         labels = labels.unsqueeze(1) if labels is not None else None
 
         return self.segmentor(
-            backbone_features=features,
+            features=features,
             mask_labels=masks,
             class_labels=labels,
         )
@@ -617,7 +636,29 @@ class LoupeModel(LoupePreTrainedModel):
             Labels for computing the patch-wise classification loss. Each element should be in range of [0, 1], indicating
             the forgery ratio of the corresponding patch.
         """
-        cls_loss, cls_logits, seg_loss, seg_logits = None, None, None, None
+        cls_loss, cls_logits, seg_loss, class_queries_logits, masks_queries_logits = (
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+        def reshape_features(features: torch.Tensor) -> torch.Tensor:
+            if self.config.backbone_config.use_cls_token:
+                # (batch_size, cls_token + num_patches, hidden_dim) -> (batch_size, num_patches, hidden_dim)
+                features = features[:, 1:, :]
+            height = width = (
+                self.config.backbone_config.image_size // self.config.patch_size
+            )
+            # (batch_size, num_patches, hidden_dim) -> (batch_size, hidden_dim, height, width)
+            return features.view(
+                features.shape[0],
+                height,
+                width,
+                features.shape[-1],
+            ).permute(0, 3, 1, 2)
+
         if self.config.stage == "cls":
             output = self.cls_forward(
                 pixel_values=pixel_values,
@@ -629,27 +670,30 @@ class LoupeModel(LoupePreTrainedModel):
         elif self.config.stage == "seg":
             cls_output = self.cls_forward(pixel_values)
             output = self.seg_forward(
-                features=cls_output.last_hidden_states,
+                features=reshape_features(cls_output.last_hidden_states),
                 masks=masks,
                 labels=labels,
             )
             seg_loss = output.loss
-            seg_logits = output.masks_queries_logits
+            masks_queries_logits = output.masks_queries_logits
+            class_queries_logits = output.class_queries_logits
         else:
             cls_output = self.cls_forward(pixel_values, labels, patch_labels)
             seg_output = self.seg_forward(
-                features=cls_output.last_hidden_states,
+                features=reshape_features(cls_output.last_hidden_states),
                 masks=masks,
                 labels=labels,
             )
             cls_loss = cls_output.loss
             cls_logits = cls_output.logits
             seg_loss = seg_output.loss
-            seg_logits = seg_output.masks_queries_logits
+            masks_queries_logits = seg_output.masks_queries_logits
+            class_queries_logits = seg_output.class_queries_logits
 
         return LoupeUniversalOutput(
             cls_loss=cls_loss,
             cls_logits=cls_logits,
             seg_loss=seg_loss,
-            seg_logits=seg_logits,
+            masks_queries_logits=masks_queries_logits,
+            class_queries_logits=class_queries_logits,
         )

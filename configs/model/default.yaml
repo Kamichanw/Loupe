@@ -14,5 +14,5 @@ backbone_overrides:
   # NOTE: pool_type of PE-Spatial-G14-448 is none
   # but loupe requires a pool_type, specify it to "attn" / "tok"
   # pool_type: "attn" / "tok"
-  pool_type: -
-  use_cls_token: -
+  pool_type: "-"
+  use_cls_token: "-"

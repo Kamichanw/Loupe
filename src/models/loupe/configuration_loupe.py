@@ -67,7 +67,7 @@ class LoupeConfig(PretrainedConfig):
         self.backbone_config.output_dim = None  # we use our own linear projection
         for key in backbone_overrides or {}:
             if hasattr(self.backbone_config, key):
-                if getattr(self.backbone_config, key) != "-":
+                if getattr(backbone_overrides, key) != "-":
                     setattr(self.backbone_config, key, backbone_overrides[key])
             else:
                 logger.warning(
