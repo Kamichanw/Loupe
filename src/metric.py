@@ -5,6 +5,7 @@ import os
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 from torchmetrics.classification import BinaryJaccardIndex
 
+
 class Metric:
     def __init__(self, threshold=0.5):
         self.threshold = threshold
@@ -40,30 +41,33 @@ class Metric:
         acc = accuracy_score(targets.cpu().numpy(), preds.cpu().numpy())
         return acc
 
-    def compute_iou(
-        self, preds: List[torch.Tensor], targets: List[torch.Tensor], threshold=None
-    ) -> float:
+    def compute_iou(self, preds: List[torch.Tensor], targets: List[torch.Tensor]) -> float:
         """
         Compute average IoU across a list of predicted and ground-truth masks.
 
         Args:
             preds (List[Tensor]): List of predicted masks, each of shape (H_i, W_i)
             targets (List[Tensor]): List of ground-truth masks, each of shape (H_i, W_i)
-            threshold (float, optional): Threshold for binarizing predictions. Defaults to self.threshold.
 
         Returns:
             float: Average IoU score.
         """
-        threshold = self.threshold if threshold is None else threshold
-        iou_scores = []
-        metric = BinaryJaccardIndex(threshold=threshold).to(preds[0].device)
-        for pred, target in zip(preds, targets):
-            pred_bin = (pred > threshold).int()
-            target_bin = target.int()
-            score = metric(pred_bin, target_bin)
-            iou_scores.append(score.item())
+        hist = torch.zeros((1, 1), device=preds[0].device)
 
-        return sum(iou_scores) / len(iou_scores) if iou_scores else 0.0
+        for pred, target in zip(preds, targets):
+            assert pred.flatten().shape == target.flatten().shape
+            pred_bin = pred.int()
+            target_bin = target.int()
+
+            mask = (target_bin >= 0) & (target_bin < 1)
+            hist += torch.bincount(
+                (target_bin[mask].long() * 1 + pred_bin[mask].long()), minlength=1
+            ).reshape(1, 1)
+
+        iou = torch.diag(hist) / (hist.sum(dim=1) + hist.sum(dim=0) - torch.diag(hist))
+        miou = torch.nanmean(iou)
+
+        return miou.item()
 
     def find_best_threshold(
         self,
