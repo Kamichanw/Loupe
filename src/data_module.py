@@ -1,4 +1,5 @@
 from functools import partial
+import numpy as np
 from omegaconf import DictConfig
 import pytorch_lightning as pl
 import torch
@@ -29,25 +30,15 @@ class DataModule(pl.LightningDataModule):
             self.testset = dataset["validation"]
 
     def train_collate_fn(self, batch):
-        images = self.processor.preprocess([x["image"].convert("RGB") for x in batch])
-        masks = self.processor.preprocess_masks(
-            [x["mask"].convert("L") if x["mask"] is not None else None for x in batch]
-        )
-        class_labels = [
-            x["mask"] is not None for x in batch
-        ]  # mask is None means it is real
+        images = [x["image"] for x in batch]
+        masks = [x["mask"] for x in batch]
+        labels = [x is not None for x in masks]  # mask is None means it is real
 
         return {
-            "pixel_values": torch.stack(images["pixel_values"]),  # (N, C, H, W)
-            "mask_labels": torch.stack(masks["pixel_values"]).squeeze(
-                1
-            ),  # (N, 1, H, W) -> (N, H, W)
-            "class_labels": torch.tensor(class_labels, dtype=torch.long),  # (N,)
-            "patch_labels": (
-                torch.stack(masks["patch_labels"])  # (N, num_patches, num_patches)
-                if self.model_config.enable_patch_cls
-                else None
+            **self.processor(
+                images, masks, self.model_config.enable_patch_cls, return_tensors="pt"
             ),
+            "labels": torch.tensor(labels, dtype=torch.long),  # (N,)
         }
 
     def train_dataloader(self):
@@ -76,48 +67,33 @@ class DataModule(pl.LightningDataModule):
             maybe_no_labels: If True, check if all images are None. If so, set mask_labels, masks, and class_labels to None.
                 Only set to True when using test_dataloader.
         """
-        image_list = [x["image"].convert("RGB") for x in batch]
-        mask_list = [
-            x["mask"].convert("L") if x["mask"] is not None else None for x in batch
-        ]
+        images = [x["image"] for x in batch]
+        masks = [x["mask"] for x in batch]
+        labels = [x is not None for x in masks]  # mask is None means it is real
 
-        if maybe_no_labels and all(x["image"] is None for x in batch):
-            # if there are no labels, we don't convert images to a batched tensor
-            images = self.processor.preprocess(image_list, do_resize=False)
-            pixel_values = images["pixel_values"]
-            mask_labels, masks, class_labels = None, None, None
+        if maybe_no_labels and not any(labels):
+            outputs = self.processor(images, return_tensors="pt")
+            labels, masks = None, None
         else:
-            images = self.processor.preprocess(image_list)
-            pixel_values = torch.stack(images["pixel_values"])
-            masks = self.processor.preprocess_masks(
-                mask_list, return_patch_labels=False
-            )
-            # (N, 1, H, W) -> (N, H, W)
-            mask_labels = torch.stack(masks["pixel_values"]).squeeze(1)
-
-            raw_masks = self.processor.preprocess_masks(
-                mask_list, return_patch_labels=False, do_resize=False
-            )
-            # (N, H_i, W_i)
-            masks = [mask.squeeze(0) for mask in raw_masks["pixel_values"]]
+            outputs = self.processor(images, masks, return_tensors="pt")
             for i, mask in enumerate(masks):
-                if mask_list[i] is None:
+                ignore_value = self.model_config.mask2former_config.ignore_value
+                if mask is None:
                     # note that in PIL image, the size is (W, H)
-                    masks[i] = torch.zeros(
-                        (image_list[i].size[1], image_list[i].size[0]),
+                    masks[i] = torch.full(
+                        (images[i].size[1], images[i].size[0]),
+                        ignore_value,
                     )
-
-            # (N,)
-            class_labels = torch.tensor(
-                [x["mask"] is not None for x in batch],
-                dtype=torch.long,
-            )
+                else:
+                    # convert to binary mask with 0 and 1
+                    mask = self.processor.convert_to_binary_masks(mask)
+                    # reduce labels
+                    masks[i] = torch.where(mask == 0, ignore_value, mask - 1)
 
         return {
-            "pixel_values": pixel_values,  # (N, C, H, W) or (N, C, H_i, W_i)
-            "mask_labels": mask_labels,  # (N, H, W) or None
-            "class_labels": class_labels,  # (N,) or None
-            "masks": masks,  # (N, H_i, W_i) or None
+            **outputs,
+            "masks": masks,  # a list of (N, H_i, W_i) or None
+            "labels": labels,  # (N,) or None
         }
 
     def test_dataloader(self):

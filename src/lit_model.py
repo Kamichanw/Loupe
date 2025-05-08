@@ -38,9 +38,11 @@ class LitModel(pl.LightningModule):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        mask_labels: torch.Tensor,
-        class_labels: torch.Tensor,
+        mask_labels: Optional[torch.Tensor] = None,
+        pixel_mask: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
         patch_labels: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None
     ):
         """
         Forward pass for the model.
@@ -48,16 +50,19 @@ class LitModel(pl.LightningModule):
         Args:
             pixel_values (torch.Tensor): Input images with shape (N, C, H, W).
             mask_labels (torch.Tensor): Input masks with shape (N, H, W).
-            class_labels (torch.LongTensor): Labels with shape (N,), indicating whether the image is forgery.
-                False means real, True means fake.
+            class_labels (torch.LongTensor): Labels with shape (N, 0 or 1). If the ith image is forgery, class_labels[i] == tensor([1]),
+                else class_labels[i] == tensor([]).
             patch_labels (Optional[torch.Tensor], optional): Patch labels with shape (N, num_patches, num_patches).
                 Only used if config.enable_patch_cls is True. Defaults to None.
+            labels (Optional[torch.Tensor], optional): Labels with shape (N,), which is used to classify the image.
         """
         output: LoupeUniversalOutput = self.loupe(
-            pixel_values,
-            mask_labels,
-            class_labels,
+            pixel_values=pixel_values,
+            mask_labels=mask_labels,
+            pixel_mask=pixel_mask,
+            class_labels=class_labels,
             patch_labels=patch_labels,
+            labels=labels,
         )
         loss_dict = {}
         if output.cls_loss is not None:
@@ -200,7 +205,7 @@ class LitModel(pl.LightningModule):
                 {
                     "val_cls_loss": outputs["cls_loss"],
                     "cls_preds": torch.sigmoid(outputs["cls_logits"]).squeeze(-1),
-                    "cls_targets": batch["class_labels"],
+                    "cls_targets": batch["labels"],
                 }
             )
         if "seg_loss" in outputs:

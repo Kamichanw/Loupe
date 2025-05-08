@@ -12,6 +12,7 @@ from transformers.activations import ACT2FN
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerPixelDecoder,
     Mask2FormerPixelDecoderOutput,
+    Mask2FormerForUniversalSegmentation,
     Mask2FormerMaskedAttentionDecoderOutput,
     Mask2FormerTransformerModule,
     Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention,
@@ -464,63 +465,21 @@ class LoupeModel(LoupePreTrainedModel):
         super().__init__(config)
         self.config = config
 
-        # init backbone
-        self.backbone = VisionTransformer(**asdict(config.backbone_config))
-        if config.freeze_backbone:
-            for param in self.backbone.parameters():
-                param.requires_grad = False
-
-        if "test" in config.stage or "cls" in config.stage:
-            backbone_output_dim = config.backbone_output_dim
-            self.classifier = LoupeClassifier(
-                input_dim=backbone_output_dim,
-                hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
-                num_layers=config.cls_mlp_layers,
-                hidden_act=config.hidden_act,
-            )
-            if config.enable_patch_cls:
-                self.patch_classifier = LoupeClassifier(
-                    input_dim=config.backbone_config.width,
-                    hidden_dim=config.backbone_config.width * config.cls_mlp_ratio,
-                    num_layers=config.cls_mlp_layers,
-                    hidden_act=config.hidden_act,
-                )
-                if config.enable_cls_fusion:
-                    self.fuser = FuseHead(config)
-            self.cls_criterion = LoupeClsLoss()
-
-            if config.freeze_cls:
-                for param in self.classifier.parameters():
-                    param.requires_grad = False
-                if config.enable_patch_cls:
-                    for param in self.patch_classifier.parameters():
-                        param.requires_grad = False
-                    if config.enable_cls_fusion:
-                        for param in self.fuser.parameters():
-                            param.requires_grad = False
-
         if "seg" in config.stage or "test" in config.stage:
-            self.segmentor = LoupeSegmentor(config)
+            orginal_mask2former_config = Mask2FormerConfig.from_pretrained(
+                config.mask2former_path,
+            )
+            orginal_mask2former_config.id2label = config.id2label
+            orginal_mask2former_config.label2id = config.label2id
+            self.segmentor = Mask2FormerForUniversalSegmentation.from_pretrained(
+                config.mask2former_path,
+                config=orginal_mask2former_config,
+                ignore_mismatched_sizes=True,
+            )
 
             if config.freeze_seg:
                 for param in self.segmentor.parameters():
                     param.requires_grad = False
-
-        self.post_init()
-
-        # load checkpoints
-        if config.backbone_path:
-            logger.info(f"Loading backbone from {config.backbone_path}")
-            if config.backbone_path.endswith(".pt"):
-                self.backbone.load_ckpt(config.backbone_path)
-            elif config.backbone_path.endswith(".safetensors"):
-                from safetensors.torch import load_file
-
-                state_dict = load_file(config.backbone_path)
-                self.load_state_dict(
-                    {k.removeprefix("loupe."): v for k, v in state_dict.items()},
-                    strict=False,
-                )
 
     def cls_forward(
         self,
@@ -597,106 +556,63 @@ class LoupeModel(LoupePreTrainedModel):
     def seg_forward(
         self,
         features: List[torch.Tensor],
-        masks: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
+        mask_labels: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
     ) -> LoupeSegmentationOutput:
         r"""
         features (`torch.Tensor` of shape `(batch_size, num_patches, hidden_dim)`, *optional*):
             Features of the input image extracted by backbone.
-        masks (`torch.Tensor` of shape `(batch_size, height, width)`, *optional*):
+        mask_labels (`torch.Tensor` of shape `(batch_size, height, width)`, *optional*):
             Segmentation masks for each image in the batch. Each mask should be in range of [0, 1], indicating the
             forgery ratio of a pixel.
-        labels (`torch.Tensor` of shape `(batch_size,)`, *optional*):
-            Labels for each image in the batch, indicating whether the image is forged.
+        class_labels (`torch.Tensor` of shape `(batch_size, 0 or 1)`, *optional*):
+            Labels for indicating whether a forged area is in the image.
         """
-        # (batch_size, height, width) -> (batch_size, num_labels=1, height, width)
-        masks = masks.unsqueeze(1) if masks is not None else None
-        # (batch_size,) -> (batch_size, num_labels=1)
-        labels = labels.unsqueeze(1) if labels is not None else None
-
         return self.segmentor(
             features=features,
-            mask_labels=masks,
-            class_labels=labels,
+            mask_labels=mask_labels,
+            class_labels=class_labels,
         )
 
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
-        masks: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
+        pixel_values: torch.Tensor,
+        mask_labels: Optional[torch.Tensor] = None,
+        pixel_mask: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
         patch_labels: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
     ) -> LoupeUniversalOutput:
         r"""
         pixel_values (`torch.FloatTensor` of shape `(batch_size, 3, height, width)`):
             Pixel values of the input image. Should be of the same size as the input image.
-        masks (`torch.FloatTensor` of shape `(batch_size, height, width)`, *optional*):
+        mask_labels (`torch.FloatTensor` of shape `(batch_size, height, width)`, *optional*):
             Segmentation masks for each image in the batch. Each mask should be in range of [0, 1], indicating the
             forgery ratio of a pixel.
-        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels for each image in the batch, indicating whether the image is forged.
+        pixel_mask (`torch.LongTensor` of shape `(batch_size, height, width)`, *optional*):
+            Mask to avoid performing attention on padding pixel values. Mask values selected in `[0, 1]`:
+
+            - 1 for pixels that are real (i.e. **not masked**),
+            - 0 for pixels that are padding (i.e. **masked**).
+        class_labels (`torch.Tensor` of shape `(batch_size, 0 or 1)`, *optional*):
+            Labels for indicating whether a forged area is in the image.
         patch_labels (`torch.FloatTensor` of shape `(batch_size, num_patches)`, *optional*):
             Labels for computing the patch-wise classification loss. Each element should be in range of [0, 1], indicating
             the forgery ratio of the corresponding patch.
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for each image in the batch, indicating whether the image is forged.
         """
-        cls_loss, cls_logits, seg_loss, class_queries_logits, masks_queries_logits = (
-            None,
-            None,
-            None,
-            None,
-            None,
+        output = self.segmentor(
+            pixel_values=pixel_values,
+            mask_labels=mask_labels,
+            pixel_mask=pixel_mask,
+            class_labels=class_labels,
         )
 
-        def reshape_features(features: torch.Tensor) -> torch.Tensor:
-            if self.config.backbone_config.use_cls_token:
-                # (batch_size, cls_token + num_patches, hidden_dim) -> (batch_size, num_patches, hidden_dim)
-                features = features[:, 1:, :]
-            height = width = (
-                self.config.backbone_config.image_size // self.config.patch_size
-            )
-            # (batch_size, num_patches, hidden_dim) -> (batch_size, hidden_dim, height, width)
-            return features.view(
-                features.shape[0],
-                height,
-                width,
-                features.shape[-1],
-            ).permute(0, 3, 1, 2)
-
-        if self.config.stage == "cls":
-            output = self.cls_forward(
-                pixel_values=pixel_values,
-                labels=labels,
-                patch_labels=patch_labels,
-            )
-            cls_loss = output.loss
-            cls_logits = output.logits
-        elif self.config.stage == "seg":
-            cls_output = self.cls_forward(pixel_values)
-            output = self.seg_forward(
-                features=reshape_features(cls_output.last_hidden_states),
-                masks=masks,
-                labels=labels,
-            )
-            seg_loss = output.loss
-            masks_queries_logits = output.masks_queries_logits
-            class_queries_logits = output.class_queries_logits
-        else:
-            cls_output = self.cls_forward(pixel_values, labels, patch_labels)
-            seg_output = self.seg_forward(
-                features=reshape_features(cls_output.last_hidden_states),
-                masks=masks,
-                labels=labels,
-            )
-            cls_loss = cls_output.loss
-            cls_logits = cls_output.logits
-            seg_loss = seg_output.loss
-            masks_queries_logits = seg_output.masks_queries_logits
-            class_queries_logits = seg_output.class_queries_logits
-
         return LoupeUniversalOutput(
-            cls_loss=cls_loss,
-            cls_logits=cls_logits,
-            seg_loss=seg_loss,
-            masks_queries_logits=masks_queries_logits,
-            class_queries_logits=class_queries_logits,
+            cls_loss=None,
+            cls_logits=None,
+            seg_loss=output.loss,
+            masks_queries_logits=output.masks_queries_logits,
+            class_queries_logits=output.class_queries_logits,
         )
