@@ -31,7 +31,6 @@ class LoupeConfig(PretrainedConfig):
         # loupe configs - segmentation
         fpn_scales: list[int | float] = [0.5, 2, 4],
         freeze_seg=False,
-        cls_checkpoint_path: Optional[str] = None,
         mask2former_path: Optional[str] = None,
         mask2former_overrides: Optional[dict] = None,
         **kwargs,
@@ -87,7 +86,6 @@ class LoupeConfig(PretrainedConfig):
 
         # loupe configs - segmentation
         self.fpn_scales = sorted(fpn_scales + [1])  # add 1x scale
-        self.cls_checkpoint_path = cls_checkpoint_path
         if enable_cls_fusion and not enable_patch_cls:
             logger.warning(
                 "enable_cls_fusion is set to True, but enable_patch_cls is set to False. "
@@ -100,26 +98,26 @@ class LoupeConfig(PretrainedConfig):
         self.hidden_size = self.backbone_config.width
         self.patch_size = self.backbone_config.patch_size
         self.image_size = self.backbone_config.image_size
-        self.feature_size = (
+        self.backbone_output_dim = (
             self.backbone_config.output_dim or self.backbone_config.width
         )
-        self.feature_channels = [self.feature_size] * len(
+        self.feature_channels = [self.backbone_output_dim] * len(
             self.fpn_scales
         )  # for vit-like backbones, there is only one scale
 
         # mask2former configs
         overlay = {k: v for k, v in (mask2former_overrides or {}).items() if v != "-"}
         overlay = {
-            **dict(
-                common_stride=self.patch_size,
-                feature_size=self.feature_size,
-                feature_strides=[
-                    round(scale * self.patch_size) for scale in self.fpn_scales
-                ],
-            ),
+            # **dict(
+            #     common_stride=self.patch_size,
+            #     feature_strides=[
+            #         round(scale * self.patch_size) for scale in self.fpn_scales
+            #     ],
+            # ),
             **overlay,
         }
         self.mask2former_config = Mask2FormerConfig(**overlay)
+        del self.mask2former_config.backbone_config
 
     @property
     def supported_backbone(self):

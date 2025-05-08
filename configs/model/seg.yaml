@@ -2,15 +2,15 @@ defaults:
   - default
   - _self_
 
-fpn_scales: [0.5, 2, 4] # rescale the last hidden states of backbone. for PE-Core-L14-336, rescale to 12x12, 48x48, 96x96
+fpn_scales: [0.5, 2] # rescale the last hidden states of backbone. for PE-Core-L14-336, rescale to 12x12, 48x48, 96x96
 freeze_backbone: True
 freeze_seg: False
 
-cls_checkpoint_path: null # if set, backbone_path will be ignored. we load backbone from cls checkpoint
+backbone_path: /gemini/code/loupe/checkpoints/cls/model.safetensors # if can also be a path to a cls checkpoint
+
 mask2former_path: null
 # mask2former overrides, you can set attr to '-' to use default value
 mask2former_overrides:
-  num_queries: 10
   num_labels: 1
   common_stride: "-" # the stride of the last feature map, for PE-Core-L14-336, it is its patch size, 14
   feature_strides: "-" # the strides of feature maps after fpn scaling

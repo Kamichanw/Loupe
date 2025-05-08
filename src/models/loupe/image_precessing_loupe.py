@@ -13,7 +13,6 @@ from transformers.image_utils import (
     PILImageResampling,
 )
 
-from models.loupe.modeling_loupe import LoupeUniversalOutput
 from .configuration_loupe import LoupeConfig
 
 NonableImageInput = Union[

@@ -6,17 +6,13 @@ import timm
 import torch
 import torch.nn as nn
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, cast
 from transformers.modeling_utils import PreTrainedModel, ModelOutput
 from transformers.activations import ACT2FN
-from transformers.modeling_outputs import ImageClassifierOutputWithNoAttention
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerPixelDecoder,
     Mask2FormerPixelDecoderOutput,
-    Mask2FormerModelOutput,
     Mask2FormerMaskedAttentionDecoderOutput,
-    Mask2FormerPixelLevelModuleOutput,
-    Mask2FormerForUniversalSegmentationOutput,
     Mask2FormerTransformerModule,
     Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention,
     Mask2FormerMaskedAttentionDecoderLayer,
@@ -181,13 +177,19 @@ class ScaleBlock(nn.Module):
         hidden_act: Union[str, type] = "gelu",
     ) -> None:
         super().__init__()
-
+        if conv1_layer == nn.ConvTranspose2d:
+            channel_args = (
+                n_channels,
+                n_channels,
+            )
+        else:
+            channel_args = ()
         self.conv1 = conv1_layer(
-            n_channels,
-            n_channels,
+            *channel_args,
             kernel_size=2,
             stride=2,
         )
+
         if isinstance(hidden_act, str):
             self.hidden_act = ACT2FN[hidden_act]
         else:
@@ -234,13 +236,16 @@ class LoupeFeaturePyramid(nn.Module):
             )
 
         self.scale_layers = nn.ModuleList(
-            [nn.Sequential(*self._make_layer(scale)) for scale in self.scales]
+            [
+                nn.Sequential(*self._make_layer(scale))
+                for scale in sorted(self.scales, reverse=True)
+            ]
         )
 
     def _make_layer(self, scale: float | int) -> list[nn.Module]:
         if scale == 1:
             return [nn.Identity()]
-        conv1_layer = nn.ConvTranspose2d if scale > 1 else nn.Conv2d
+        conv1_layer = nn.ConvTranspose2d if scale > 1 else nn.MaxPool2d
         num_steps = abs(int(round(math.log2(scale))))
         return [
             ScaleBlock(self.hidden_dim, conv1_layer=conv1_layer)
@@ -261,7 +266,7 @@ class LoupeSegmentor(nn.Module):
             mask2former_config, config.feature_channels
         )
         self.mask2former_decoder = Mask2FormerTransformerModule(
-            in_features=config.feature_size, config=mask2former_config
+            in_features=mask2former_config.feature_size, config=mask2former_config
         )
 
         # this is a bug of transformers library
@@ -379,91 +384,79 @@ class LoupePreTrainedModel(PreTrainedModel):
     base_model_prefix = "loupe"
     main_input_name = "pixel_values"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["ResidualAttentionBlock", "Rope2D"]
     _supports_sdpa = True
     _supports_flash_attn_2 = True
 
     def _init_weights(self, module) -> None:
         """Initialize the weights"""
-        is_zero_init = getattr(self.config, "_zero_init", False)
+        config = cast(LoupeConfig, self.config)
+        xavier_std = config.mask2former_config.init_xavier_std
+        std = config.initializer_range
         if isinstance(module, (VisionTransformer, FuseHead, LoupeClassifier)):
             module.init_tensors()
         elif isinstance(module, Mask2FormerTransformerModule):
             if module.input_projections is not None:
                 for input_projection in module.input_projections:
                     if not isinstance(input_projection, nn.Sequential):
-                        nn.init.constant_(input_projection.weight, 0.0)
-                        nn.init.constant_(input_projection.bias, 0.0)
-
-            if hasattr(module, "level_embed"):
-                if is_zero_init:
-                    nn.init.zeros_(
-                        module.level_embed.weight
-                    )  # Mean of 0.0 for zero_init test
-                else:
-                    nn.init.ones_(
-                        module.level_embed.weight
-                    )  # Mean of 1.0 for normal case
-
-            if hasattr(module, "queries_embedder"):
-                # Use normal initialization with std=1.0
-                nn.init.normal_(module.queries_embedder.weight, mean=0.0, std=1.0)
-            if hasattr(module, "queries_features"):
-                # Use normal initialization with std=1.0
-                nn.init.normal_(module.queries_features.weight, mean=0.0, std=1.0)
+                        nn.init.xavier_uniform_(
+                            input_projection.weight, gain=xavier_std
+                        )
+                        nn.init.constant_(input_projection.bias, 0)
 
         elif isinstance(
             module, Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention
         ):
-            # Initialize parameters according to test requirements
-            nn.init.constant_(module.sampling_offsets.weight, 0.0)
-            if hasattr(module.sampling_offsets, "bias"):
-                nn.init.constant_(module.sampling_offsets.bias, 0.0)
+            nn.init.constant_(module.sampling_offsets.weight.data, 0.0)
+            thetas = torch.arange(module.n_heads, dtype=torch.int64).float() * (
+                2.0 * math.pi / module.n_heads
+            )
+            grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
+            grid_init = (
+                (grid_init / grid_init.abs().max(-1, keepdim=True)[0])
+                .view(module.n_heads, 1, 1, 2)
+                .repeat(1, module.n_levels, module.n_points, 1)
+            )
+            for i in range(module.n_points):
+                grid_init[:, :, i, :] *= i + 1
+            with torch.no_grad():
+                module.sampling_offsets.bias = nn.Parameter(grid_init.view(-1))
 
-            nn.init.constant_(module.attention_weights.weight, 0.0)
-            nn.init.constant_(module.attention_weights.bias, 0.0)
-
-            # value_proj weight should NOT be all zeros according to the test
-            nn.init.xavier_uniform_(module.value_proj.weight)
-            nn.init.constant_(module.value_proj.bias, 0.0)
-
-            nn.init.constant_(module.output_proj.weight, 0.0)
-            nn.init.constant_(module.output_proj.bias, 0.0)
+            nn.init.constant_(module.attention_weights.weight.data, 0.0)
+            nn.init.constant_(module.attention_weights.bias.data, 0.0)
+            nn.init.xavier_uniform_(module.value_proj.weight.data)
+            nn.init.constant_(module.value_proj.bias.data, 0.0)
+            nn.init.xavier_uniform_(module.output_proj.weight.data)
+            nn.init.constant_(module.output_proj.bias.data, 0.0)
 
         elif isinstance(module, Mask2FormerMaskedAttentionDecoderLayer):
-            # Initialize all parameters to small non-zero values
             for p in module.parameters():
-                if p.dim() > 1:  # Weights
-                    nn.init.constant_(p, 0.0)
-                elif p.dim() == 1:  # Bias terms
-                    # Small constant value for bias terms to pass bias initialization test
-                    nn.init.constant_(p, 0.0001)
+                if p.dim() > 1:
+                    nn.init.xavier_uniform_(p, gain=xavier_std)
 
-        elif isinstance(module, nn.Embedding):
-            # Handle embedding initialization
-            if "level_embed" in str(module):
-                with torch.no_grad():
-                    if is_zero_init:
-                        module.weight.fill_(0.0)  # Mean of 0.0 for zero_init test
-                    else:
-                        module.weight.fill_(1.0)  # Mean of 1.0 for normal case
-            else:
-                # Use normal initialization with std=1.0 for other embeddings
-                # This is required to pass the test_embedding_initialization test
-                with torch.no_grad():
-                    module.weight.normal_(mean=0.0, std=1.0)
-                    if module.padding_idx is not None:
-                        module.weight[module.padding_idx].zero_()
+        elif isinstance(module, Mask2FormerPixelDecoder):
+            for p in module.parameters():
+                if p.dim() > 1:
+                    nn.init.xavier_uniform_(p)
+            nn.init.normal_(module.level_embed, std=0)
+
+        elif isinstance(module, Mask2FormerPixelDecoderEncoderOnly):
+            for p in module.parameters():
+                if p.dim() > 1:
+                    nn.init.xavier_uniform_(p)
 
         elif isinstance(module, (nn.Linear, nn.Conv2d, nn.BatchNorm2d)):
-            # Use constant initialization for all weights and biases
-            nn.init.constant_(module.weight, 0.0)
+            module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
-                nn.init.constant_(module.bias, 0.0)
+                module.bias.data.zero_()
+
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
 
         if hasattr(module, "reference_points"):
-            nn.init.constant_(module.reference_points.weight, 0.0)
-            nn.init.constant_(module.reference_points.bias, 0.0)
+            nn.init.xavier_uniform_(module.reference_points.weight.data, gain=1.0)
+            nn.init.constant_(module.reference_points.bias.data, 0.0)
 
 
 class LoupeModel(LoupePreTrainedModel):
@@ -478,7 +471,7 @@ class LoupeModel(LoupePreTrainedModel):
                 param.requires_grad = False
 
         if "test" in config.stage or "cls" in config.stage:
-            backbone_output_dim = config.feature_size
+            backbone_output_dim = config.backbone_output_dim
             self.classifier = LoupeClassifier(
                 input_dim=backbone_output_dim,
                 hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
@@ -517,7 +510,17 @@ class LoupeModel(LoupePreTrainedModel):
 
         # load checkpoints
         if config.backbone_path:
-            self.backbone.load_ckpt(config.backbone_path)
+            logger.info(f"Loading backbone from {config.backbone_path}")
+            if config.backbone_path.endswith(".pt"):
+                self.backbone.load_ckpt(config.backbone_path)
+            elif config.backbone_path.endswith(".safetensors"):
+                from safetensors.torch import load_file
+
+                state_dict = load_file(config.backbone_path)
+                self.load_state_dict(
+                    {k.removeprefix("loupe."): v for k, v in state_dict.items()},
+                    strict=False,
+                )
 
     def cls_forward(
         self,

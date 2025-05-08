@@ -142,3 +142,4 @@ outputs/
 results/
 perception_models/
 Inference_with_Mask2Former.ipynb
+checkpoints/

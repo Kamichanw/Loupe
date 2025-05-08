@@ -6,6 +6,6 @@ defaults:
   - hparams: ${stage} 
 
 seed: 42
-precision: 16-mixed
+precision: bf16-mixed
 strategy: deepspeed_stage_2_offload # options: "deepspeed_stage_2_offload" / "ddp"
 

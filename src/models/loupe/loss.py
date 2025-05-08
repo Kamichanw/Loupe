@@ -227,7 +227,9 @@ class LoupeHungarianMatcher(Mask2FormerHungarianMatcher):
             cost_matrix = torch.maximum(cost_matrix, torch.tensor(-1e10))
             cost_matrix = torch.nan_to_num(cost_matrix, 0)
             # do the assigmented using the hungarian algorithm in scipy
-            assigned_indices: Tuple[np.array] = linear_sum_assignment(cost_matrix.cpu())
+            assigned_indices: Tuple[np.array] = linear_sum_assignment(
+                cost_matrix.to(torch.float).cpu()
+            )
             indices.append(assigned_indices)
 
         # It could be stacked in one tensor
@@ -251,7 +253,7 @@ class LoupeSegLoss(Mask2FormerLoss):
             "loss_dice": config.mask2former_config.dice_weight,
         }
         super().__init__(config.mask2former_config, self.weight_dict)
-        del self._modules["matcher"]
+
         self.matcher = LoupeHungarianMatcher(
             cost_mask=config.mask2former_config.mask_weight,
             cost_dice=config.mask2former_config.dice_weight,

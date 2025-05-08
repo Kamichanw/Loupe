@@ -1,3 +1,4 @@
+from functools import partial
 from omegaconf import DictConfig
 import pytorch_lightning as pl
 import torch
@@ -58,44 +59,72 @@ class DataModule(pl.LightningDataModule):
             shuffle=True,
         )
 
-    def val_collate_fn(self, batch):
-        images = self.processor.preprocess([x["image"].convert("RGB") for x in batch])
-        masks = self.processor.preprocess_masks(
-            [x["mask"].convert("L") if x["mask"] is not None else None for x in batch],
-            return_patch_labels=False,
-        )
-        raw_masks = self.processor.preprocess_masks(
-            [x["mask"].convert("L") if x["mask"] is not None else None for x in batch],
-            return_patch_labels=False,
-            do_resize=False,
-        )
-        class_labels = [x["mask"] is not None for x in batch]
-
-        return {
-            "pixel_values": torch.stack(images["pixel_values"]),  # (N, C, H, W)
-            "mask_labels": torch.stack(masks["pixel_values"]).squeeze(
-                1
-            ),  # (N, 1, H, W) -> (N, H, W)
-            "class_labels": torch.tensor(class_labels, dtype=torch.long),  # (N,)
-            "masks": [
-                mask.squeeze(1) for mask in raw_masks["patch_labels"]
-            ],  # (N, H_i, W_i)
-        }
-
     def val_dataloader(self):
         return DataLoader(
             self.validset,
             batch_size=self.cfg.hparams.batch_size,
             num_workers=self.cfg.num_workers,
-            collate_fn=self.val_collate_fn,
+            collate_fn=self.test_collate_fn,
             shuffle=False,
         )
+
+    def test_collate_fn(self, batch, maybe_no_labels: bool = False):
+        """
+        Collate function for valid and test dataloaders.
+        Args:
+            batch: List of dictionaries containing "image" and "mask" keys.
+            maybe_no_labels: If True, check if all images are None. If so, set mask_labels, masks, and class_labels to None.
+                Only set to True when using test_dataloader.
+        """
+        image_list = [x["image"].convert("RGB") for x in batch]
+        mask_list = [
+            x["mask"].convert("L") if x["mask"] is not None else None for x in batch
+        ]
+
+        if maybe_no_labels and all(x["image"] is None for x in batch):
+            # if there are no labels, we don't convert images to a batched tensor
+            images = self.processor.preprocess(image_list, do_resize=False)
+            pixel_values = images["pixel_values"]
+            mask_labels, masks, class_labels = None, None, None
+        else:
+            images = self.processor.preprocess(image_list)
+            pixel_values = torch.stack(images["pixel_values"])
+            masks = self.processor.preprocess_masks(
+                mask_list, return_patch_labels=False
+            )
+            # (N, 1, H, W) -> (N, H, W)
+            mask_labels = torch.stack(masks["pixel_values"]).squeeze(1)
+
+            raw_masks = self.processor.preprocess_masks(
+                mask_list, return_patch_labels=False, do_resize=False
+            )
+            # (N, H_i, W_i)
+            masks = [mask.squeeze(0) for mask in raw_masks["pixel_values"]]
+            for i, mask in enumerate(masks):
+                if mask_list[i] is None:
+                    # note that in PIL image, the size is (W, H)
+                    masks[i] = torch.zeros(
+                        (image_list[i].size[1], image_list[i].size[0]),
+                    )
+
+            # (N,)
+            class_labels = torch.tensor(
+                [x["mask"] is not None for x in batch],
+                dtype=torch.long,
+            )
+
+        return {
+            "pixel_values": pixel_values,  # (N, C, H, W) or (N, C, H_i, W_i)
+            "mask_labels": mask_labels,  # (N, H, W) or None
+            "class_labels": class_labels,  # (N,) or None
+            "masks": masks,  # (N, H_i, W_i) or None
+        }
 
     def test_dataloader(self):
         return DataLoader(
             self.testset,
             batch_size=self.cfg.hparams.batch_size,
             num_workers=self.cfg.num_workers,
-            collate_fn=self.val_collate_fn,
+            collate_fn=partial(self.test_collate_fn, maybe_no_labels=True),
             shuffle=False,
         )

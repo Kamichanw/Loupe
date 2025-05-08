@@ -263,15 +263,8 @@ class LitModel(pl.LightningModule):
         self.val_outputs.clear()
 
     def test_step(self, batch, batch_idx):
+        masks = batch.pop("masks", None)
         outputs = self(**batch)
-        preds = torch.sigmoid(outputs["cls_logits"]).squeeze(-1)
-        targets = batch["labels"]
-        self.test_outputs.append(
-            {
-                "preds": preds,
-                "targets": targets,
-            }
-        )
 
     def on_test_epoch_end(self):
         preds = torch.cat([o["cls_preds"] for o in self.test_outputs])
@@ -287,15 +280,11 @@ class LitModel(pl.LightningModule):
         self.test_outputs.clear()
 
     def on_save_checkpoint(self, checkpoint):
-        full_state_dict = self.state_dict()
-
-        trainable_state_dict = {
+        checkpoint["state_dict"] = {
             name: param
-            for name, param in full_state_dict.items()
-            if self.get_parameter(name).requires_grad
+            for name, param in self.state_dict().items()
+            if param.requires_grad
         }
-
-        checkpoint["state_dict"] = trainable_state_dict
         return checkpoint
 
     def on_load_checkpoint(self, checkpoint):

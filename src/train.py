@@ -1,4 +1,6 @@
 import os
+import re
+import subprocess
 import sys
 import hydra
 import torch
@@ -43,18 +45,22 @@ def main(cfg: DictConfig):
         name="logs",
         default_hp_metric=False,
     )
+    fast_dev_run = False
     trainer = pl.Trainer(
         logger=logger,
         callbacks=[LearningRateMonitor(), RichProgressBar(), checkpoint_callback],
-        # fast_dev_run=True,
-        # devices=1,
-        max_epochs=cfg.hparams.epoch,
-        devices=len(
-            os.environ.get(
-                "CUDA_VISIBLE_DEVICES",
-                ",".join(str(i) for i in range(torch.cuda.device_count())),
-            ).split(",")
+        fast_dev_run=fast_dev_run,
+        devices=(
+            1
+            if fast_dev_run
+            else len(
+                os.environ.get(
+                    "CUDA_VISIBLE_DEVICES",
+                    ",".join(str(i) for i in range(torch.cuda.device_count())),
+                ).split(",")
+            )
         ),
+        max_epochs=cfg.hparams.epoch,
         strategy=cfg.strategy,
         precision=cfg.precision,
         gradient_clip_val=cfg.hparams.grad_clip_val,
@@ -73,6 +79,36 @@ def main(cfg: DictConfig):
         model,
         data_module,
     )
+
+    if "deepspeed" in cfg.strategy and not fast_dev_run:
+        converted_save_path = os.path.join(project_root, "checkpoints", cfg.stage.name)
+        if os.path.isdir(converted_save_path) and os.listdir(converted_save_path):
+            exist_dirs = [
+                os.path.join(project_root, "checkpoints", d)
+                for d in os.listdir(os.path.join(project_root, "checkpoints"))
+                if os.path.isdir(os.path.join(project_root, "checkpoints", d))
+                and d.startswith(cfg.stage.name)
+            ]
+            nums = re.findall(
+                rf"{re.escape(cfg.stage.name)}_(\d+)",
+                " ".join(os.path.basename(d) for d in exist_dirs),
+            )
+            max_num = max(map(int, nums)) if nums else 0
+            converted_save_path += f"_{max_num + 1}"
+        result = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(checkpoint_callback.best_model_path, "zero_to_fp32.py"),
+                checkpoint_callback.best_model_path,
+                converted_save_path,
+                "--safe_serialization",
+            ]
+        )
+        if result.returncode != 0:
+            print("Error converting model to FP32.")
+            sys.exit(1)
+        else:
+            print(f"Model converted to FP32 and saved to {converted_save_path}.")
 
 
 if __name__ == "__main__":
