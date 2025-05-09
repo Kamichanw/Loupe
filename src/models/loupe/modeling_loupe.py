@@ -326,6 +326,7 @@ class LoupeSegmentor(nn.Module):
     def forward(
         self,
         features: torch.Tensor,
+        pixel_mask: Optional[torch.Tensor] = None,
         mask_labels: Optional[torch.Tensor] = None,
         class_labels: Optional[torch.Tensor] = None,
     ):
@@ -557,6 +558,7 @@ class LoupeModel(LoupePreTrainedModel):
         self,
         features: List[torch.Tensor],
         mask_labels: Optional[torch.Tensor] = None,
+        pixel_mask: Optional[torch.Tensor] = None,
         class_labels: Optional[torch.Tensor] = None,
     ) -> LoupeSegmentationOutput:
         r"""
@@ -570,6 +572,7 @@ class LoupeModel(LoupePreTrainedModel):
         """
         return self.segmentor(
             features=features,
+            pixel_mask=pixel_mask,
             mask_labels=mask_labels,
             class_labels=class_labels,
         )

@@ -9,6 +9,6 @@ weight_decay: 5e-2
 # set to null to freeze backbone
 backbone_lr: null
 
-epoch: 3
+epoch: 5
 batch_size: 40
-accumulate_grad_batches: 6
+accumulate_grad_batches: 3

@@ -2,7 +2,7 @@ defaults:
   - default
   - _self_
 
-fpn_scales: [0.5, 2] # rescale the last hidden states of backbone. for PE-Core-L14-336, rescale to 12x12, 48x48, 96x96
+fpn_scales: [0.5, 2, 4] # rescale the last hidden states of backbone. for PE-Core-L14-336, rescale to 12x12, 48x48, 96x96
 freeze_backbone: True
 freeze_seg: False
 

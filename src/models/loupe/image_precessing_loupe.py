@@ -15,7 +15,7 @@ from transformers.image_utils import (
     IMAGENET_STANDARD_MEAN,
     IMAGENET_STANDARD_STD,
     PILImageResampling,
-    ImageInput
+    ImageInput,
 )
 
 from .configuration_loupe import LoupeConfig
@@ -39,9 +39,10 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
         do_rescale=True,
         do_normalize=True,
         do_reduce_labels=True,
-        image_mean: Union[float, List[float]] = None,
-        image_std: Union[float, List[float]] = None,
-        ignore_index: Optional[int] = None,
+        image_mean: Union[float, List[float]] = IMAGENET_STANDARD_MEAN,
+        image_std: Union[float, List[float]] = IMAGENET_STANDARD_STD,
+        ignore_index: int = 255,
+        size_divisor: int = 0,
         **kwargs
     ):
         super().__init__(
@@ -50,15 +51,18 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
             do_rescale=do_rescale,
             do_normalize=do_normalize,
             do_reduce_labels=do_reduce_labels,
-            image_mean=image_mean or IMAGENET_STANDARD_MEAN,
-            image_std=image_std or IMAGENET_STANDARD_STD,
-            ignore_index=ignore_index or 255,
+            image_mean=image_mean,
+            image_std=image_std,
+            ignore_index=ignore_index,
+            size_divisor=size_divisor,
             **kwargs
         )
         self.config = config
-    
-    def convert_to_binary_masks(self, masks: ImageInput, return_normalized_mask: bool = False):
-        """ convert masks to binary mask with 0 and 1 """
+
+    def convert_to_binary_masks(
+        self, masks: ImageInput, return_normalized_mask: bool = False
+    ):
+        """convert masks to binary mask with 0 and 1"""
         is_batched = isinstance(masks, (list, tuple))
         if not is_batched:
             masks = [masks]
@@ -67,23 +71,22 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
             if isinstance(mask, PIL.Image.Image):
                 mask = np.array(mask.convert("L"))
             if isinstance(mask, np.ndarray):
-                mask = torch.tensor(mask, dtype=torch.uint8)
+                mask = torch.tensor(mask)
             min_val, max_val = mask.min(), mask.max()
             if max_val - min_val > 0:
                 mask = (mask - min_val) / (max_val - min_val)
             else:
-                mask = torch.zeros_like(mask, dtype=torch.uint8)
+                mask = torch.zeros_like(mask)
             masks[i] = (mask >= torch.rand_like(mask)).to(torch.uint8)
             normalized_mask.append(mask.squeeze(0))
-        
+
         if not is_batched:
             masks = masks[0]
             normalized_mask = normalized_mask[0]
-        
+
         if return_normalized_mask:
             return masks, normalized_mask
         return masks
-        
 
     def __call__(
         self,
@@ -114,7 +117,9 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
                     mask_tensors.append(torch.zeros((H, W)))
                     normalized_masks.append(mask_tensors[-1])
                 else:
-                    mask, normalized_mask = self.convert_to_binary_masks(mask, return_normalized_mask=True)
+                    mask, normalized_mask = self.convert_to_binary_masks(
+                        mask, return_normalized_mask=True
+                    )
                     mask_tensors.append(mask)
                     normalized_masks.append(normalized_mask)
         else:
