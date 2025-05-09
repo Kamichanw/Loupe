@@ -52,19 +52,25 @@ class Metric:
         Returns:
             float: Average IoU score.
         """
-        hist = torch.zeros((1, 1), device=preds[0].device)
+        num_labels = 2  # Two categories: foreground (0) and background (255)
+
+        hist = torch.zeros((num_labels, num_labels), device=preds[0].device)
 
         for pred, target in zip(preds, targets):
             assert pred.flatten().shape == target.flatten().shape
-            pred_bin = pred.int()
-            target_bin = target.int()
+            pred_bin = (pred == 0).long()  # 0 for foreground
+            target_bin = (target == 0).long()  # 0 for foreground
 
-            mask = (target_bin >= 0) & (target_bin < 1)
+            # Compute the confusion matrix
+            mask = (target_bin >= 0) & (target_bin < num_labels)
             hist += torch.bincount(
-                (target_bin[mask].long() * 1 + pred_bin[mask].long()), minlength=1
-            ).reshape(1, 1)
+                (target_bin[mask].long() * num_labels + pred_bin[mask].long()), minlength=num_labels**2
+            ).reshape(num_labels, num_labels)
 
+        # Compute IoU per class and take the average
         iou = torch.diag(hist) / (hist.sum(dim=1) + hist.sum(dim=0) - torch.diag(hist))
+
+        # Avoid division by zero and handle NaN values
         miou = torch.nanmean(iou)
 
         return miou.item()

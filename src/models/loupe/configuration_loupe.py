@@ -1,9 +1,17 @@
 from typing import Literal, Optional
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.mask2former import Mask2FormerConfig
 from loguru import logger
 
 from models.pe import PE_VISION_CONFIG, PEConfig
+
+
+def may_convert_to_object(obj):
+    """Convert a ListConfig or DictConfig to a list or dict."""
+    if isinstance(obj, (ListConfig, DictConfig)):
+        return OmegaConf.to_container(obj, resolve=True)
+    return obj
 
 
 class LoupeConfig(PretrainedConfig):
@@ -106,18 +114,14 @@ class LoupeConfig(PretrainedConfig):
         )  # for vit-like backbones, there is only one scale
 
         # mask2former configs
-        overlay = {k: v for k, v in (mask2former_overrides or {}).items() if v != "-"}
         overlay = {
-            # **dict(
-            #     common_stride=self.patch_size,
-            #     feature_strides=[
-            #         round(scale * self.patch_size) for scale in self.fpn_scales
-            #     ],
-            # ),
-            **overlay,
+            k: may_convert_to_object(v)
+            for k, v in (mask2former_overrides or {}).items()
+            if v != "-"
         }
         self.mask2former_config = Mask2FormerConfig(**overlay)
-        del self.mask2former_config.backbone_config
+        self.label2id = self.mask2former_config.label2id
+        self.id2label = self.mask2former_config.id2label
 
     @property
     def supported_backbone(self):

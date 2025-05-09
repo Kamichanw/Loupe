@@ -25,7 +25,7 @@ project_root = Path(__file__).resolve().parent.parent
 
 @hydra.main(
     config_path=str(project_root / "configs"),
-    config_name="base.yaml",
+    config_name="base",
     version_base=None,
 )
 def main(cfg: DictConfig):
@@ -75,10 +75,7 @@ def main(cfg: DictConfig):
     model = LitModel(cfg, loupe)
     data_module = DataModule(cfg, loupe_config)
 
-    trainer.fit(
-        model,
-        data_module,
-    )
+    trainer.fit(model, data_module)
 
     if "deepspeed" in cfg.strategy and not fast_dev_run:
         converted_save_path = os.path.join(project_root, "checkpoints", cfg.stage.name)

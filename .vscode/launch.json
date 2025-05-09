@@ -5,11 +5,14 @@
     "version": "0.2.0",
     "configurations": [
         
+        
+        
+        
         {
             "name": "Python Debugger: Current File with Arguments",
             "type": "debugpy",
             "request": "launch",
-            "program": "${file}",
+            "program": "${workspaceFolder}/src/train.py",
             "console": "integratedTerminal",
             "args": ["stage=seg"]
         }

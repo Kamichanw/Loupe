@@ -23,7 +23,7 @@ project_root = Path(__file__).resolve().parent.parent
 
 @hydra.main(
     config_path=str(project_root / "configs"),
-    config_name="base.yaml",
+    config_name="base",
     version_base=None,
 )
 def main(cfg: DictConfig):

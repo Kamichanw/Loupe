@@ -12,6 +12,7 @@ from transformers.activations import ACT2FN
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerPixelDecoder,
     Mask2FormerPixelDecoderOutput,
+    Mask2FormerForUniversalSegmentation,
     Mask2FormerMaskedAttentionDecoderOutput,
     Mask2FormerTransformerModule,
     Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention,
@@ -325,6 +326,7 @@ class LoupeSegmentor(nn.Module):
     def forward(
         self,
         features: torch.Tensor,
+        pixel_mask: Optional[torch.Tensor] = None,
         mask_labels: Optional[torch.Tensor] = None,
         class_labels: Optional[torch.Tensor] = None,
     ):
@@ -597,47 +599,53 @@ class LoupeModel(LoupePreTrainedModel):
     def seg_forward(
         self,
         features: List[torch.Tensor],
-        masks: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
+        mask_labels: Optional[torch.Tensor] = None,
+        pixel_mask: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
     ) -> LoupeSegmentationOutput:
         r"""
         features (`torch.Tensor` of shape `(batch_size, num_patches, hidden_dim)`, *optional*):
             Features of the input image extracted by backbone.
-        masks (`torch.Tensor` of shape `(batch_size, height, width)`, *optional*):
+        mask_labels (`torch.Tensor` of shape `(batch_size, height, width)`, *optional*):
             Segmentation masks for each image in the batch. Each mask should be in range of [0, 1], indicating the
             forgery ratio of a pixel.
-        labels (`torch.Tensor` of shape `(batch_size,)`, *optional*):
-            Labels for each image in the batch, indicating whether the image is forged.
+        class_labels (`torch.Tensor` of shape `(batch_size, 0 or 1)`, *optional*):
+            Labels for indicating whether a forged area is in the image.
         """
-        # (batch_size, height, width) -> (batch_size, num_labels=1, height, width)
-        masks = masks.unsqueeze(1) if masks is not None else None
-        # (batch_size,) -> (batch_size, num_labels=1)
-        labels = labels.unsqueeze(1) if labels is not None else None
-
         return self.segmentor(
             features=features,
-            mask_labels=masks,
-            class_labels=labels,
+            pixel_mask=pixel_mask,
+            mask_labels=mask_labels,
+            class_labels=class_labels,
         )
 
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
-        masks: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
+        pixel_values: torch.Tensor,
+        mask_labels: Optional[torch.Tensor] = None,
+        pixel_mask: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.Tensor] = None,
         patch_labels: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
     ) -> LoupeUniversalOutput:
         r"""
         pixel_values (`torch.FloatTensor` of shape `(batch_size, 3, height, width)`):
             Pixel values of the input image. Should be of the same size as the input image.
-        masks (`torch.FloatTensor` of shape `(batch_size, height, width)`, *optional*):
+        mask_labels (`torch.FloatTensor` of shape `(batch_size, height, width)`, *optional*):
             Segmentation masks for each image in the batch. Each mask should be in range of [0, 1], indicating the
             forgery ratio of a pixel.
-        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels for each image in the batch, indicating whether the image is forged.
+        pixel_mask (`torch.LongTensor` of shape `(batch_size, height, width)`, *optional*):
+            Mask to avoid performing attention on padding pixel values. Mask values selected in `[0, 1]`:
+
+            - 1 for pixels that are real (i.e. **not masked**),
+            - 0 for pixels that are padding (i.e. **masked**).
+        class_labels (`torch.Tensor` of shape `(batch_size, 0 or 1)`, *optional*):
+            Labels for indicating whether a forged area is in the image.
         patch_labels (`torch.FloatTensor` of shape `(batch_size, num_patches)`, *optional*):
             Labels for computing the patch-wise classification loss. Each element should be in range of [0, 1], indicating
             the forgery ratio of the corresponding patch.
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for each image in the batch, indicating whether the image is forged.
         """
         cls_loss, cls_logits, seg_loss, class_queries_logits, masks_queries_logits = (
             None,
@@ -674,8 +682,9 @@ class LoupeModel(LoupePreTrainedModel):
             cls_output = self.cls_forward(pixel_values)
             output = self.seg_forward(
                 features=reshape_features(cls_output.last_hidden_states),
-                masks=masks,
-                labels=labels,
+                pixel_mask=pixel_mask,
+                mask_labels=mask_labels,
+                class_labels=class_labels,
             )
             seg_loss = output.loss
             masks_queries_logits = output.masks_queries_logits
@@ -684,8 +693,9 @@ class LoupeModel(LoupePreTrainedModel):
             cls_output = self.cls_forward(pixel_values, labels, patch_labels)
             seg_output = self.seg_forward(
                 features=reshape_features(cls_output.last_hidden_states),
-                masks=masks,
-                labels=labels,
+                mask_labels=mask_labels,
+                pixel_mask=pixel_mask,
+                class_labels=class_labels,
             )
             cls_loss = cls_output.loss
             cls_logits = cls_output.logits

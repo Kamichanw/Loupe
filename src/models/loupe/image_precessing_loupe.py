@@ -1,16 +1,21 @@
-from typing import List, Optional, Tuple, Union, Unpack
+import random
+from typing import Dict, List, Optional, Tuple, Union, Unpack
 import PIL
+import PIL.Image
 import numpy as np
 import torch
+from torchvision import transforms as T
 from transformers.image_processing_utils_fast import (
     BaseImageProcessorFast,
     DefaultFastImageProcessorKwargs,
     BatchFeature,
 )
+from transformers.models.mask2former import Mask2FormerImageProcessor
 from transformers.image_utils import (
     IMAGENET_STANDARD_MEAN,
     IMAGENET_STANDARD_STD,
     PILImageResampling,
+    ImageInput,
 )
 
 from .configuration_loupe import LoupeConfig
@@ -25,88 +30,124 @@ NonableImageInput = Union[
 ]
 
 
-class LoupeImageProcessor(BaseImageProcessorFast):
-    resample = PILImageResampling.BILINEAR
-    image_mean = IMAGENET_STANDARD_MEAN
-    image_std = IMAGENET_STANDARD_STD
-    size = {"height": 336, "width": 336}
-    do_resize = True
-    do_rescale = True
-    do_normalize = True
-
+class LoupeImageProcessor(Mask2FormerImageProcessor):
     def __init__(
-        self, config: LoupeConfig, **kwargs: Unpack[DefaultFastImageProcessorKwargs]
-    ):
-        super().__init__(**kwargs)
-        self.config = config
-        self.size = {"height": config.image_size, "width": config.image_size}
-
-    def preprocess_masks(
         self,
-        masks: NonableImageInput,
-        return_patch_labels: Optional[bool] = None,
-        **kwargs: Unpack[DefaultFastImageProcessorKwargs]
+        config: LoupeConfig,
+        size: Dict[str, int] = None,
+        do_resize=True,
+        do_rescale=True,
+        do_normalize=True,
+        do_reduce_labels=True,
+        image_mean: Union[float, List[float]] = IMAGENET_STANDARD_MEAN,
+        image_std: Union[float, List[float]] = IMAGENET_STANDARD_STD,
+        ignore_index: int = 255,
+        size_divisor: int = 0,
+        **kwargs
     ):
-        """
-        Preprocess the input masks.
-        Args:
-            masks (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor` or list of them, item can be None):
-                    The input masks to be preprocessed. If a list, it can contain None values.
-                    The None values will be replaced with zero tensors of the same shape as the other masks, denoting
-                    all pixels are real.
-            return_patch_labels (`bool`, *optional*):
-                    Whether to return patch labels. If `True`, the output will include patch labels.
-                    If `None`, it will use the value of `self.config.enable_patch_cls`.
-            kwargs: Additional keyword arguments for preprocessing, but only `device` is used.
-        """
-        device = kwargs.pop("device", None)
-        do_resize = kwargs.pop("do_resize", self.do_resize)
-        return_patch_labels = return_patch_labels or self.config.enable_patch_cls
-
-        if isinstance(masks, (list, tuple)):
-            none_idx = [i for i, mask in enumerate(masks) if mask is None]
-            masks = [mask for mask in masks if mask is not None]
-        else:
-            none_idx = []
-
-        masks = self.preprocess(
-            masks,
-            do_normalize=False,
-            do_convert_rgb=False,
-            device=device,
+        super().__init__(
+            size=size or {"height": config.image_size, "width": config.image_size},
             do_resize=do_resize,
+            do_rescale=do_rescale,
+            do_normalize=do_normalize,
+            do_reduce_labels=do_reduce_labels,
+            image_mean=image_mean,
+            image_std=image_std,
+            ignore_index=ignore_index,
+            size_divisor=size_divisor,
+            **kwargs
         )
-        pixel_values = masks["pixel_values"]
-        for idx in none_idx:
-            pixel_values.insert(
-                idx,
-                torch.zeros(
-                    (1, self.size["height"], self.size["width"]), device=device
-                ),
-            )
-        if not return_patch_labels:
-            return masks
+        self.config = config
 
-        patch_size = self.config.patch_size
-        patch_labels = []
-        for mask in pixel_values:
-            C, H, W = mask.shape
-            # patch_size * (1, patch_size, W)
-            rows = mask.split(patch_size, dim=1)
-            patch_label_list = []
-            for row in rows:
-                # patch_size * (1, patch_size, patch_size)
-                patches = row.split(patch_size, dim=2)
-                patch_label_list.append(
-                    torch.tensor([patch.mean() for patch in patches], device=device)
-                )
+    def convert_to_binary_masks(
+        self, masks: ImageInput, return_normalized_mask: bool = False
+    ):
+        """convert masks to binary mask with 0 and 1"""
+        is_batched = isinstance(masks, (list, tuple))
+        if not is_batched:
+            masks = [masks]
+        normalized_mask = []
+        for i, mask in enumerate(masks):
+            if isinstance(mask, PIL.Image.Image):
+                mask = np.array(mask.convert("L"))
+            if isinstance(mask, np.ndarray):
+                mask = torch.tensor(mask)
+            min_val, max_val = mask.min(), mask.max()
+            if max_val - min_val > 0:
+                mask = (mask - min_val) / (max_val - min_val)
+            else:
+                mask = torch.zeros_like(mask)
+            masks[i] = (mask >= torch.rand_like(mask)).to(torch.uint8)
+            normalized_mask.append(mask.squeeze(0))
 
-            # (num_patches, num_patches)
-            patch_labels.append(torch.stack(patch_label_list))
+        if not is_batched:
+            masks = masks[0]
+            normalized_mask = normalized_mask[0]
 
-        return BatchFeature(
-            {"pixel_values": pixel_values, "patch_labels": patch_labels}
-        )
+        if return_normalized_mask:
+            return masks, normalized_mask
+        return masks
+
+    def __call__(
+        self,
+        images,
+        segmentation_maps: Optional[NonableImageInput] = None,
+        return_patch_labels: bool = False,
+        **kwargs
+    ):
+        if not isinstance(images, (list, tuple)):
+            images = [images]
+        images = [
+            image.convert("RGB") if isinstance(image, PIL.Image.Image) else image
+            for image in images
+        ]
+        if segmentation_maps is not None:
+            if not isinstance(segmentation_maps, (list, tuple)):
+                segmentation_maps = [segmentation_maps]
+            mask_tensors = []
+            normalized_masks: List[torch.Tensor] = []
+            for i, mask in enumerate(segmentation_maps):
+                if mask is None:
+                    # if mask is not provided, create a zero tensor of the same size as the image
+                    if isinstance(images[i], PIL.Image.Image):
+                        W, H = images[i].size
+                    elif isinstance(images[i], (np.ndarray, torch.Tensor)):
+                        H, W = images[i].shape[:2]
+
+                    mask_tensors.append(torch.zeros((H, W)))
+                    normalized_masks.append(mask_tensors[-1])
+                else:
+                    mask, normalized_mask = self.convert_to_binary_masks(
+                        mask, return_normalized_mask=True
+                    )
+                    mask_tensors.append(mask)
+                    normalized_masks.append(normalized_mask)
+        else:
+            mask_tensors = None
+
+        outputs = super().__call__(images, mask_tensors, **kwargs)
+
+        if segmentation_maps is not None and return_patch_labels:
+            patch_size = self.config.patch_size
+            patch_labels = []
+            device = outputs.pixel_values[0].device
+            for mask in normalized_masks:
+                H, W = mask.shape
+                # patch_size * (patch_size, W)
+                rows = mask.split(patch_size, dim=0)
+                patch_label_list = []
+                for row in rows:
+                    # patch_size * (patch_size, patch_size)
+                    patches = row.split(patch_size, dim=1)
+                    patch_label_list.append(
+                        torch.tensor([patch.mean() for patch in patches], device=device)
+                    )
+
+                # (num_patches, num_patches)
+                patch_labels.append(torch.stack(patch_label_list))
+            outputs["patch_labels"] = patch_labels
+
+        return outputs
 
     def post_process_segmentation(
         self,
