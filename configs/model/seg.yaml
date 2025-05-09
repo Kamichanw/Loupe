@@ -11,7 +11,6 @@ backbone_path: /gemini/code/loupe/checkpoints/cls/model.safetensors # if can als
 mask2former_path: /gemini/code/loupe/pretrained_weights/mask2former
 # mask2former overrides, you can set attr to '-' to use default value
 mask2former_overrides:
-  num_labels: 1
   id2label:
     0: "forgery"
   label2id:

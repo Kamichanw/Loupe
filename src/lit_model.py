@@ -283,15 +283,3 @@ class LitModel(pl.LightningModule):
         self.log("f1_thres", best_threshold_f1, prog_bar=True, sync_dist=True)
         self.log("auc", auc, prog_bar=True, sync_dist=True)
         self.test_outputs.clear()
-
-    def on_save_checkpoint(self, checkpoint):
-        checkpoint["state_dict"] = {
-            name: param
-            for name, param in self.state_dict().items()
-            if param.requires_grad
-        }
-        return checkpoint
-
-    def on_load_checkpoint(self, checkpoint):
-        trainable_state_dict = checkpoint["state_dict"]
-        self.load_state_dict(trainable_state_dict, strict=False)

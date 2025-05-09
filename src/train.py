@@ -45,7 +45,7 @@ def main(cfg: DictConfig):
         name="logs",
         default_hp_metric=False,
     )
-    fast_dev_run = True
+    fast_dev_run = False
     trainer = pl.Trainer(
         logger=logger,
         callbacks=[LearningRateMonitor(), RichProgressBar(), checkpoint_callback],
