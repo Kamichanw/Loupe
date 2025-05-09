@@ -77,7 +77,7 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
                 mask = (mask - min_val) / (max_val - min_val)
             else:
                 mask = torch.zeros_like(mask)
-            masks[i] = (mask >= torch.rand_like(mask)).to(torch.uint8)
+            masks[i] = (mask >= torch.rand_like(mask.float())).to(torch.uint8)
             normalized_mask.append(mask.squeeze(0))
 
         if not is_batched:
