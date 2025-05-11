@@ -55,9 +55,12 @@ class Metric:
         for pred, target in zip(preds, targets):
             # skip real images
             if not torch.all(target == 0):
+                # in predictions, 0 is for forged region, 1 is for background (no object class)
+                # so we need to invert the mask
+                pred = torch.where(pred == 0, 1, 0)
                 predictions.append(pred)
                 references.append(target)
-            
+
         return self.iou_metric.compute(
             predictions=predictions,
             references=references,
