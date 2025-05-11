@@ -2,13 +2,15 @@
 hidden_act: "gelu"
 hidden_dropout_prob: 0.1
 initializer_range: 0.02
-checkpoint_path: null # if set, backbone_path will be ignored
+checkpoint_path: null
 
 # backbone configs
 backbone_name: PE-Core-L14-336
 backbone_path: /gemini/code/loupe/pretrained_weights/pe/PE-Core-L14-336.pt
 freeze_backbone: False
+
 # backbone overrides, you can set attr to '-' to use default value
+# visit https://github.com/facebookresearch/perception_models/blob/main/core/vision_encoder/config.py for available overrides
 backbone_overrides:
   output_dim: null # set to null to use our own proj mlp
   # NOTE: pool_type of PE-Spatial-G14-448 is none

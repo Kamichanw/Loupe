@@ -10,7 +10,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/src/train.py",
             "console": "integratedTerminal",
-            "args": ["stage=seg"]
+            "args": ["stage=seg", "fast_dev_run=True", ]
         }
     ]
 }

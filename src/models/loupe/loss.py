@@ -18,55 +18,62 @@ if is_scipy_available():
     from scipy.optimize import linear_sum_assignment
 
 
-# reference: https://github.com/abhuse/polyloss-pytorch/blob/main/polyloss.py
 class Poly1FocalLoss(nn.Module):
     """
-    Poly1FocalLoss for binary classification tasks (real vs fake), supporting soft labels.
+    Poly1FocalLoss for multi-class classification (supports both hard and soft labels).
+
+    Combines Cross-Entropy Loss with Focal Loss modulation and a polynomial penalty term.
+    Supports hard labels (class indices) and soft labels (class probabilities).
 
     Args:
-        epsilon (float): Poly loss epsilon term coefficient.
-        alpha (float): Class balancing factor (weight for positive samples).
-        gamma (float): Focusing parameter for focal loss.
-        reduction: Literal["mean", "sum", "none"] = "mean",
+        epsilon (float): Coefficient for the poly1 penalty term.
+        gamma (float): Focusing parameter for focal term.
+        alpha (float or Tensor or None): Class balancing weight.
+            - If float ∈ [0, 1], treated as scalar weight for foreground vs background (like binary).
+            - If Tensor of shape [num_classes], class-wise weights.
+            - If None, no weighting applied.
+        reduction (str): 'mean' | 'sum' | 'none' (default: 'mean').
+
+    Inputs:
+        logits (Tensor): Raw model outputs before softmax. Shape: [B, C]
+        targets (Tensor):
+            - If dtype == long: hard labels, shape [B]
+            - If dtype == float: soft labels, shape [B, C]
+
+    Returns:
+        loss (Tensor): Scalar if reduced, else per-sample vector of shape [B]
     """
 
-    def __init__(
-        self,
-        epsilon: float = 1.0,
-        alpha: float = 0.9,
-        gamma: float = 2.0,
-    ):
-        super(Poly1FocalLoss, self).__init__()
-        assert 0 <= alpha <= 1, "alpha should be between 0 and 1."
+    def __init__(self, epsilon=1.0, gamma=2.0, alpha=None, reduction="mean"):
+        super().__init__()
         self.epsilon = epsilon
-        self.alpha = alpha
         self.gamma = gamma
-        self.reduction = "mean"
+        self.alpha = alpha
+        self.reduction = reduction
 
-    def forward(
-        self,
-        logits,
-        labels,
-        **kwargs,
-    ):
-        """
-        Args:
-            logits: Tensor of shape [N, num_patches], raw logits (before sigmoid).
-            labels: Tensor of shape [N, num_patches], containing (fake_prob).
-            kwargs: Additional arguments passed to binary_cross_entropy.
-        Returns:
-            Loss value (scalar or tensor depending on reduction).
-        """
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor):
         p = torch.sigmoid(logits)
+        num_classes = logits.shape[1]
+        if labels.dtype == torch.long:
+            # if labels are of shape [N]
+            # convert to one-hot tensor of shape [N, num_classes]
+            if labels.ndim == 1:
+                labels = F.one_hot(labels, num_classes=num_classes)
 
-        assert (
-            p.shape == labels.shape
-        ), f"Expected logits and labels to have the same shape, got {logits.shape} and {labels.shape}."
+            # if labels are of shape [N, ...] e.g. segmentation task
+            # convert to one-hot tensor of shape [N, num_classes, ...]
+            else:
+                labels = (
+                    F.one_hot(labels.unsqueeze(1), num_classes)
+                    .transpose(1, -1)
+                    .squeeze_(-1)
+                )
+
+        labels = labels.to(device=logits.device, dtype=logits.dtype)
 
         ce_loss = F.binary_cross_entropy_with_logits(
-            input=logits, target=labels, reduction="none", **kwargs
+            input=logits, target=labels, reduction="none"
         )
-
         pt = labels * p + (1 - labels) * (1 - p)
         FL = ce_loss * ((1 - pt) ** self.gamma)
 
@@ -84,11 +91,74 @@ class Poly1FocalLoss(nn.Module):
         return poly1
 
 
+def tversky_loss(
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    num_masks: int,
+    alpha: float = 0.5,
+    beta: float = 0.5,
+    smooth: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Tversky loss (generalized Dice loss) for binary masks.
+
+    Args:
+        inputs (Tensor): Raw logits from the model. Shape: [num_queries, H, W] or [B, Q, H, W]
+        labels (Tensor): Ground-truth masks (binary). Same shape as inputs.
+        num_masks (int): Number of ground-truth masks (used for averaging).
+        alpha (float): Weight for false positives.
+        beta (float): Weight for false negatives.
+        smooth (float): Small constant to avoid division by zero.
+
+    Returns:
+        Tensor: Scalar loss normalized by num_masks.
+    """
+    probs = inputs.sigmoid().flatten(1)  # [N, H*W]
+    labels = labels.flatten(1).float()  # Ensure float type
+
+    TP = (probs * labels).sum(-1)
+    FP = (probs * (1 - labels)).sum(-1)
+    FN = ((1 - probs) * labels).sum(-1)
+
+    tversky = (TP + smooth) / (TP + alpha * FP + beta * FN + smooth)
+    loss = 1.0 - tversky
+
+    return loss.sum() / num_masks
+
+
+def sigmoid_poly1_focal_loss(
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    num_masks: int,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+    epsilon: float = 1.0,
+) -> torch.Tensor:
+    r"""
+    Args:
+        inputs (`torch.Tensor`):
+            A float tensor of arbitrary shape.
+        labels (`torch.Tensor`):
+            A tensor with the same shape as inputs. Stores the binary classification labels for each element in inputs
+            (0 for the negative class and 1 for the positive class).
+
+    Returns:
+        loss (`torch.Tensor`): The computed loss.
+    """
+    criterion = Poly1FocalLoss(
+        alpha=alpha, gamma=gamma, epsilon=epsilon, reduction="none"
+    )
+    poly1_loss = criterion(inputs, labels)
+
+    loss = poly1_loss.mean(1).sum() / num_masks
+    return loss
+
+
 class LoupeClsLoss(nn.Module):
     def __init__(
         self,
         epsilon: float = 1.0,
-        alpha: float = 0.9,
+        alpha: float = 0.25,
         gamma: float = 2.0,
     ):
         super(LoupeClsLoss, self).__init__()
@@ -246,6 +316,12 @@ class LoupeHungarianMatcher(Mask2FormerHungarianMatcher):
 # there are too many bugs in transformers implementation
 # so we have to rewrite the loss some parts
 class LoupeSegLoss(Mask2FormerLoss):
+    """
+    We modified the original Mask2FormerLoss with the following changes:
+    1. Use Poly1FocalLoss instead of CrossEntropyLoss for class labels.
+    2.
+    """
+
     def __init__(self, config: LoupeConfig):
         self.weight_dict = {
             "loss_cross_entropy": config.mask2former_config.class_weight,
@@ -259,6 +335,85 @@ class LoupeSegLoss(Mask2FormerLoss):
             cost_dice=config.mask2former_config.dice_weight,
             num_points=config.mask2former_config.train_num_points,
         )
+        self.tversky_alpha = config.tversky_alpha
+        self.pixel_focal_alpha = config.seg_pixel_focal_alpha
+
+    def loss_masks(
+        self,
+        masks_queries_logits: torch.Tensor,
+        mask_labels: List[torch.Tensor],
+        indices: Tuple[np.array],
+        num_masks: int,
+    ) -> Dict[str, torch.Tensor]:
+        """Compute the losses related to the masks using sigmoid_cross_entropy_loss and dice loss.
+
+        Args:
+            masks_queries_logits (`torch.Tensor`):
+                A tensor of shape `(batch_size, num_queries, height, width)`.
+            mask_labels (`torch.Tensor`):
+                List of mask labels of shape `(labels, height, width)`.
+            indices (`Tuple[np.array])`:
+                The indices computed by the Hungarian matcher.
+            num_masks (`int)`:
+                The number of masks, used for normalization.
+
+        Returns:
+            losses (`Dict[str, Tensor]`): A dict of `torch.Tensor` containing two keys:
+            - **loss_mask** -- The loss computed using sigmoid cross entropy loss on the predicted and ground truth.
+              masks.
+            - **loss_dice** -- The loss computed using dice loss on the predicted on the predicted and ground truth,
+              masks.
+        """
+        src_idx = self._get_predictions_permutation_indices(indices)
+        tgt_idx = self._get_targets_permutation_indices(indices)
+        # shape (batch_size * num_queries, height, width)
+        pred_masks = masks_queries_logits[src_idx]
+        # shape (batch_size, num_queries, height, width)
+        # pad all and stack the targets to the num_labels dimension
+        target_masks, _ = self._pad_images_to_max_in_batch(mask_labels)
+        target_masks = target_masks[tgt_idx]
+
+        # No need to upsample predictions as we are using normalized coordinates
+        pred_masks = pred_masks[:, None]
+        target_masks = target_masks[:, None]
+
+        # Sample point coordinates
+        with torch.no_grad():
+            point_coordinates = self.sample_points_using_uncertainty(
+                pred_masks,
+                lambda logits: self.calculate_uncertainty(logits),
+                self.num_points,
+                self.oversample_ratio,
+                self.importance_sample_ratio,
+            )
+
+            point_labels = sample_point(
+                target_masks, point_coordinates, align_corners=False
+            ).squeeze(1)
+
+        point_logits = sample_point(
+            pred_masks, point_coordinates, align_corners=False
+        ).squeeze(1)
+
+        losses = {
+            "loss_mask": sigmoid_poly1_focal_loss(
+                point_logits,
+                point_labels,
+                num_masks,
+                alpha=self.pixel_focal_alpha,
+            ),
+            "loss_dice": tversky_loss(
+                point_logits,
+                point_labels,
+                num_masks,
+                self.tversky_alpha,
+                1 - self.tversky_alpha,
+            ),
+        }
+
+        del pred_masks
+        del target_masks
+        return losses
 
     def sample_points_using_uncertainty(
         self,

@@ -98,7 +98,7 @@ class LoupeUniversalOutput(ModelOutput):
     masks_queries_logits: Optional[torch.FloatTensor] = None
 
 
-class LoupeClassifier(nn.Module):
+class LoupeClsHead(nn.Module):
 
     def __init__(
         self,
@@ -257,6 +257,97 @@ class LoupeFeaturePyramid(nn.Module):
         return [layer(x) for layer in self.scale_layers]
 
 
+class LoupeClassifier(nn.Module):
+    def __init__(self, config: LoupeConfig):
+        super().__init__()
+        self.config = config
+        backbone_output_dim = config.backbone_output_dim
+        self.classifier = LoupeClsHead(
+            input_dim=backbone_output_dim,
+            hidden_dim=backbone_output_dim * config.cls_mlp_ratio,
+            num_layers=config.cls_mlp_layers,
+            hidden_act=config.hidden_act,
+        )
+        if config.enable_patch_cls:
+            self.patch_classifier = LoupeClsHead(
+                input_dim=config.backbone_config.width,
+                hidden_dim=config.backbone_config.width * config.cls_mlp_ratio,
+                num_layers=config.cls_mlp_layers,
+                hidden_act=config.hidden_act,
+            )
+            if config.enable_cls_fusion:
+                self.fuser = FuseHead(config)
+        self.criterion = LoupeClsLoss()
+
+        if config.freeze_cls:
+            for param in self.classifier.parameters():
+                param.requires_grad = False
+            if config.enable_patch_cls:
+                for param in self.patch_classifier.parameters():
+                    param.requires_grad = False
+                if config.enable_cls_fusion:
+                    for param in self.fuser.parameters():
+                        param.requires_grad = False
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        pooled_features: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        patch_labels: Optional[torch.Tensor] = None,
+    ) -> LoupeClassificationOutput:
+        # features: (batch_size, cls_token + num_patches, output_dim)
+
+        loss, logits, patch_logits = None, None, None
+        if labels is not None:
+            # regular classification
+            if self.config.backbone_config.pool_type in ["attn", "avg", "tok"]:
+                # output: (batch_size, output_dim)
+                global_logits = self.classifier(pooled_features)
+            else:
+                if self.config.backbone_config.use_cls_token:
+                    # output: (batch_size, cls_token + num_patches, output_dim)
+                    global_logits = self.classifier(pooled_features[:, 0, :])
+                else:
+                    raise ValueError(
+                        "pool_type cannot be none when use_cls_token is False"
+                    )
+            # global_logits: (batch_size, 1)
+
+            # patch classification
+            if self.config.enable_patch_cls:
+                patch_features = (
+                    features[:, 1:, :]
+                    if self.config.backbone_config.use_cls_token
+                    else features
+                )
+                # patch_logits: (batch_size, num_patches, 1)
+                patch_logits = self.patch_classifier(patch_features)
+                if self.config.enable_cls_fusion:
+                    logits = self.fuser(
+                        torch.cat([global_logits, patch_logits.squeeze(-1)], dim=1)
+                    )
+                else:
+                    # regular cls loss will only be on the global logits
+                    logits = global_logits
+            else:
+                logits = global_logits
+            # logits: (batch_size, 1)
+
+            loss = self.criterion(
+                cls_logits=logits,
+                cls_labels=labels,
+                patch_logits=patch_logits,
+                patch_labels=patch_labels,
+            )
+
+        return LoupeClassificationOutput(
+            loss=loss,
+            logits=logits,
+            last_hidden_states=features,
+        )
+
+
 class LoupeSegmentor(nn.Module):
     def __init__(self, config: LoupeConfig):
         super().__init__()
@@ -282,6 +373,10 @@ class LoupeSegmentor(nn.Module):
         )
 
         self.criterion = LoupeSegLoss(config=config)
+
+        if config.freeze_seg:
+            for param in self.parameters():
+                param.requires_grad = False
 
     def get_loss_dict(
         self,
@@ -394,7 +489,7 @@ class LoupePreTrainedModel(PreTrainedModel):
         config = cast(LoupeConfig, self.config)
         xavier_std = config.mask2former_config.init_xavier_std
         std = config.initializer_range
-        if isinstance(module, (VisionTransformer, FuseHead, LoupeClassifier)):
+        if isinstance(module, (VisionTransformer, FuseHead, LoupeClsHead)):
             module.init_tensors()
         elif isinstance(module, Mask2FormerTransformerModule):
             if module.input_projections is not None:
@@ -466,29 +561,60 @@ class LoupeModel(LoupePreTrainedModel):
         super().__init__(config)
         self.config = config
 
+        # init backbone
+        self.backbone = VisionTransformer(**asdict(config.backbone_config))
+        if config.freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
+        if "test" in config.stage or "cls" in config.stage:
+            self.classifier = LoupeClassifier(config)
+
         if "seg" in config.stage or "test" in config.stage:
-            orginal_mask2former_config = Mask2FormerConfig.from_pretrained(
-                config.mask2former_path,
-            )
-            orginal_mask2former_config.id2label = config.id2label
-            orginal_mask2former_config.label2id = config.label2id
-            self.segmentor = Mask2FormerForUniversalSegmentation.from_pretrained(
-                config.mask2former_path,
-                config=orginal_mask2former_config,
-                ignore_mismatched_sizes=True,
+            self.segmentor = LoupeSegmentor(config)
+
+        self.post_init()
+
+        def load_from_safetensors(path: str):
+            if not os.path.exists(path):
+                raise ValueError(f"Checkpoint {path} does not exist.")
+
+            if not path.endswith(".safetensors"):
+                raise ValueError(f"Checkpoint {path} is not a safetensors file.")
+            
+            from safetensors.torch import load_file
+
+            state_dict = load_file(path)
+            self.load_state_dict(
+                {k.removeprefix("loupe."): v for k, v in state_dict.items()},
+                strict=False,
             )
 
-            if config.freeze_seg:
-                for param in self.segmentor.parameters():
-                    param.requires_grad = False
+        # load checkpoints
+        if config.backbone_path:
+            logger.info(f"Loading backbone from {config.backbone_path}")
+            if config.backbone_path.endswith(".pt"):
+                self.backbone.load_ckpt(config.backbone_path)
+            elif config.backbone_path.endswith(".safetensors"):
+                load_from_safetensors(config.backbone_path)
+        
+        if config.checkpoint_path and config.checkpoint_path.endswith(".safetensors"):
+            logger.info(f"Loading checkpoint from {config.checkpoint_path}")
+            load_from_safetensors(config.checkpoint_path)
 
     def cls_forward(
         self,
-        pixel_values: torch.Tensor,
+        features: torch.Tensor,
+        pooled_features: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         patch_labels: Optional[torch.Tensor] = None,
     ) -> LoupeClassificationOutput:
         r"""
+        features (`torch.Tensor` of shape `(batch_size, cls_token + num_patches, hidden_dim)`):
+            Features of the input image extracted by backbone.
+        pooled_features (`torch.Tensor`, *optional*):
+            Pooled features of the input image extracted by backbone. If `pool_type` is "attn", "avg" or "tok", this
+            should be the output of the pooling layer. If `pool_type` is "cls", this should be the output of the cls token.
         labels (`torch.LongTensor` of shape `(batch_size,)`):
             Labels for computing the image classification/regression loss. Indices should be in `[0, ...,
             config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
@@ -499,59 +625,11 @@ class LoupeModel(LoupePreTrainedModel):
         labels (`torch.Tensor` of shape `(batch_size,)`, *optional*):
             Labels for each image in the batch, indicating whether the image is forged.
         """
-
-        # features: (batch_size, cls_token + num_patches, output_dim)
-        features = self.backbone.forward_features(pixel_values, norm=True)
-
-        loss, logits, patch_logits = None, None, None
-        if labels is not None:
-            output = self.backbone._pool(features)
-
-            # regular classification
-            if self.config.backbone_config.pool_type in ["attn", "avg", "tok"]:
-                # output: (batch_size, output_dim)
-                global_logits = self.classifier(output)
-            else:
-                if self.config.backbone_config.use_cls_token:
-                    # output: (batch_size, cls_token + num_patches, output_dim)
-                    global_logits = self.classifier(output[:, 0, :])
-                else:
-                    raise ValueError(
-                        "pool_type cannot be none when use_cls_token is False"
-                    )
-            # global_logits: (batch_size, 1)
-
-            # patch classification
-            if self.config.enable_patch_cls:
-                patch_features = (
-                    features[:, 1:, :]
-                    if self.config.backbone_config.use_cls_token
-                    else features
-                )
-                # patch_logits: (batch_size, num_patches, 1)
-                patch_logits = self.patch_classifier(patch_features)
-                if self.config.enable_cls_fusion:
-                    logits = self.fuser(
-                        torch.cat([global_logits, patch_logits.squeeze(-1)], dim=1)
-                    )
-                else:
-                    # regular cls loss will only be on the global logits
-                    logits = global_logits
-            else:
-                logits = global_logits
-            # logits: (batch_size, 1)
-
-            loss = self.cls_criterion(
-                cls_logits=logits,
-                cls_labels=labels,
-                patch_logits=patch_logits,
-                patch_labels=patch_labels,
-            )
-
-        return LoupeClassificationOutput(
-            loss=loss,
-            logits=logits,
-            last_hidden_states=features,
+        return self.classifier(
+            features=features,
+            pooled_features=pooled_features,
+            labels=labels,
+            patch_labels=patch_labels,
         )
 
     def seg_forward(
@@ -605,17 +683,74 @@ class LoupeModel(LoupePreTrainedModel):
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for each image in the batch, indicating whether the image is forged.
         """
-        output = self.segmentor(
-            pixel_values=pixel_values,
-            mask_labels=mask_labels,
-            pixel_mask=pixel_mask,
-            class_labels=class_labels,
+        cls_loss, cls_logits, seg_loss, class_queries_logits, masks_queries_logits = (
+            None,
+            None,
+            None,
+            None,
+            None,
         )
 
+        def reshape_features(features: torch.Tensor) -> torch.Tensor:
+            if self.config.backbone_config.use_cls_token:
+                # (batch_size, cls_token + num_patches, hidden_dim) -> (batch_size, num_patches, hidden_dim)
+                features = features[:, 1:, :]
+            height = width = (
+                self.config.backbone_config.image_size // self.config.patch_size
+            )
+            # (batch_size, num_patches, hidden_dim) -> (batch_size, hidden_dim, height, width)
+            return features.view(
+                features.shape[0],
+                height,
+                width,
+                features.shape[-1],
+            ).permute(0, 3, 1, 2)
+
+        # features: (batch_size, cls_token + num_patches, hidden_dim)
+        features = self.backbone.forward_features(pixel_values, norm=True)
+        pooled_features = self.backbone._pool(features)
+        if self.config.stage == "cls":
+            output = self.cls_forward(
+                features=features,
+                pooled_features=pooled_features,
+                labels=labels,
+                patch_labels=patch_labels,
+            )
+            cls_loss = output.loss
+            cls_logits = output.logits
+        elif self.config.stage == "seg":
+            output = self.seg_forward(
+                features=reshape_features(features),
+                pixel_mask=pixel_mask,
+                mask_labels=mask_labels,
+                class_labels=class_labels,
+            )
+            seg_loss = output.loss
+            masks_queries_logits = output.masks_queries_logits
+            class_queries_logits = output.class_queries_logits
+        else:
+            cls_output = self.cls_forward(
+                features=features,
+                pooled_features=pooled_features,
+                labels=labels,
+                patch_labels=patch_labels,
+            )
+            seg_output = self.seg_forward(
+                features=reshape_features(features),
+                mask_labels=mask_labels,
+                pixel_mask=pixel_mask,
+                class_labels=class_labels,
+            )
+            cls_loss = cls_output.loss
+            cls_logits = cls_output.logits
+            seg_loss = seg_output.loss
+            masks_queries_logits = seg_output.masks_queries_logits
+            class_queries_logits = seg_output.class_queries_logits
+
         return LoupeUniversalOutput(
-            cls_loss=None,
-            cls_logits=None,
-            seg_loss=output.loss,
-            masks_queries_logits=output.masks_queries_logits,
-            class_queries_logits=output.class_queries_logits,
+            cls_loss=cls_loss,
+            cls_logits=cls_logits,
+            seg_loss=seg_loss,
+            masks_queries_logits=masks_queries_logits,
+            class_queries_logits=class_queries_logits,
         )

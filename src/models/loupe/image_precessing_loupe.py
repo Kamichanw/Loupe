@@ -4,12 +4,7 @@ import PIL
 import PIL.Image
 import numpy as np
 import torch
-from torchvision import transforms as T
-from transformers.image_processing_utils_fast import (
-    BaseImageProcessorFast,
-    DefaultFastImageProcessorKwargs,
-    BatchFeature,
-)
+import torch.nn.functional as F
 from transformers.models.mask2former import Mask2FormerImageProcessor
 from transformers.image_utils import (
     IMAGENET_STANDARD_MEAN,
@@ -78,7 +73,7 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
             else:
                 mask = torch.zeros_like(mask)
             masks[i] = (mask >= torch.rand_like(mask.float())).to(torch.uint8)
-            normalized_mask.append(mask.squeeze(0))
+            normalized_mask.append(mask.float().squeeze(0))
 
         if not is_batched:
             masks = masks[0]
@@ -130,9 +125,16 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
         if segmentation_maps is not None and return_patch_labels:
             patch_size = self.config.patch_size
             patch_labels = []
-            device = outputs.pixel_values[0].device
-            for mask in normalized_masks:
-                H, W = mask.shape
+            pixel_values = outputs.pixel_values
+            device = pixel_values[0].device
+            for i, mask in enumerate(normalized_masks):
+                H, W = pixel_values[i].shape[-2:]
+                mask = F.interpolate(
+                    mask[None, None, ...],
+                    size=pixel_values[i].shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                ).view(H, W)
                 # patch_size * (patch_size, W)
                 rows = mask.split(patch_size, dim=0)
                 patch_label_list = []
@@ -145,7 +147,7 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
 
                 # (num_patches, num_patches)
                 patch_labels.append(torch.stack(patch_label_list))
-            outputs["patch_labels"] = patch_labels
+            outputs["patch_labels"] = torch.stack(patch_labels)
 
         return outputs
 
@@ -174,17 +176,16 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
                 `torch.Tensor` correspond to a semantic class id.
         """
         # Scale back to preprocessed image size - (384, 384) for all models
-        masks_queries_logits = torch.nn.functional.interpolate(
+        masks_queries_logits = F.interpolate(
             masks_queries_logits, size=(384, 384), mode="bilinear", align_corners=False
         )
 
-        # Remove the null class `[..., :-1]`
-        masks_classes = class_queries_logits.softmax(dim=-1)[..., :-1]
+        masks_classes = class_queries_logits.softmax(dim=-1)
         masks_probs = (
             masks_queries_logits.sigmoid()
         )  # [batch_size, num_queries, height, width]
 
-        # Semantic segmentation logits of shape (batch_size, num_classes, height, width)
+        # Semantic segmentation logits of shape (batch_size, num_classes + 1 (background class), height, width)
         segmentation = torch.einsum("bqc, bqhw -> bchw", masks_classes, masks_probs)
         batch_size = class_queries_logits.shape[0]
 
@@ -197,18 +198,20 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
 
             semantic_segmentation = []
             for idx in range(batch_size):
-                resized_logits = torch.nn.functional.interpolate(
+                resized_logits = F.interpolate(
                     segmentation[idx].unsqueeze(dim=0),
                     size=target_sizes[idx],
                     mode="bilinear",
                     align_corners=False,
                 )
                 semantic_map = resized_logits[0].argmax(dim=0)
-                semantic_segmentation.append(semantic_map)
+                semantic_segmentation.append(semantic_map.to(dtype=torch.uint8))
         else:
             semantic_segmentation = segmentation.argmax(dim=1)
+            # convert tensor to batch list
             semantic_segmentation = [
-                semantic_segmentation[i] for i in range(semantic_segmentation.shape[0])
+                semantic_segmentation[i].to(dtype=torch.uint8)
+                for i in range(semantic_segmentation.shape[0])
             ]
 
         return semantic_segmentation

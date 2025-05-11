@@ -8,4 +8,5 @@ defaults:
 seed: 42
 precision: bf16-mixed
 strategy: deepspeed_stage_2_offload # options: "deepspeed_stage_2_offload" / "ddp"
+fast_dev_run: false # set to true for debugging
 

@@ -3,3 +3,4 @@ lightning[extra]
 hydra-core
 deepspeed
 scikit-learn
+evaluate

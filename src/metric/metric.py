@@ -1,14 +1,17 @@
-from typing import Callable, List
+import os
 import torch
 import numpy as np
-import os
+import evaluate
+from pathlib import Path
+from typing import Callable, List
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
-from torchmetrics.classification import BinaryJaccardIndex
 
 
 class Metric:
     def __init__(self, threshold=0.5):
         self.threshold = threshold
+        parent_dir = Path(__file__).resolve().parent
+        self.iou_metric = evaluate.load(os.path.join(parent_dir, "mean_iou.py"))
 
     def compute_f1(
         self, preds: torch.Tensor, targets: torch.Tensor, threshold=None
@@ -26,7 +29,7 @@ class Metric:
         return f1
 
     def compute_auc(self, preds: torch.Tensor, targets: torch.Tensor) -> float:
-        preds = preds.detach().cpu().numpy()
+        preds = preds.detach().float().cpu().numpy()
         targets = targets.int().cpu().numpy()
         auc = roc_auc_score(targets, preds, average="macro")
         return auc
@@ -41,39 +44,27 @@ class Metric:
         acc = accuracy_score(targets.cpu().numpy(), preds.cpu().numpy())
         return acc
 
-    def compute_iou(self, preds: List[torch.Tensor], targets: List[torch.Tensor]) -> float:
-        """
-        Compute average IoU across a list of predicted and ground-truth masks.
-
-        Args:
-            preds (List[Tensor]): List of predicted masks, each of shape (H_i, W_i)
-            targets (List[Tensor]): List of ground-truth masks, each of shape (H_i, W_i)
-
-        Returns:
-            float: Average IoU score.
-        """
-        num_labels = 2  # Two categories: foreground (0) and background (255)
-
-        hist = torch.zeros((num_labels, num_labels), device=preds[0].device)
-
+    def compute_iou(
+        self,
+        preds: List[torch.Tensor],
+        targets: List[torch.Tensor],
+        reduce_labels: bool = False,
+    ) -> float:
+        predictions = []
+        references = []
         for pred, target in zip(preds, targets):
-            assert pred.flatten().shape == target.flatten().shape
-            pred_bin = (pred == 0).long()  # 0 for foreground
-            target_bin = (target == 0).long()  # 0 for foreground
-
-            # Compute the confusion matrix
-            mask = (target_bin >= 0) & (target_bin < num_labels)
-            hist += torch.bincount(
-                (target_bin[mask].long() * num_labels + pred_bin[mask].long()), minlength=num_labels**2
-            ).reshape(num_labels, num_labels)
-
-        # Compute IoU per class and take the average
-        iou = torch.diag(hist) / (hist.sum(dim=1) + hist.sum(dim=0) - torch.diag(hist))
-
-        # Avoid division by zero and handle NaN values
-        miou = torch.nanmean(iou)
-
-        return miou.item()
+            # skip real images
+            if not torch.all(target == 0):
+                predictions.append(pred)
+                references.append(target)
+            
+        return self.iou_metric.compute(
+            predictions=predictions,
+            references=references,
+            num_labels=2,
+            ignore_index=255,
+            reduce_labels=reduce_labels,
+        )["mean_iou"]
 
     def find_best_threshold(
         self,

@@ -6,7 +6,7 @@ import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from models.loupe import LoupeImageProcessor, LoupeConfig
 
 
@@ -22,10 +22,27 @@ class DataModule(pl.LightningDataModule):
         dataset = load_dataset("parquet", data_dir=self.cfg.data_dir)
         if stage in [None, "validate", "fit"]:
             self.trainset = dataset["train"]
+            validset = dataset["validation"]
+            if isinstance(self.cfg.valid_size, int):
+                assert 0 < self.cfg.valid_size < len(validset)
+                valid_size = self.cfg.valid_size
+            elif isinstance(self.cfg.valid_size, float):
+                assert 0 < self.cfg.valid_size <= 1
+                valid_size = int(self.cfg.valid_size * len(validset))
+            else:
+                raise ValueError(
+                    f"Invalid valid_size: {self.cfg.valid_size}. It should be either int or float."
+                )
+
+            additional_trainset, validset = validset.train_test_split(
+                test_size=valid_size, seed=self.cfg.seed, shuffle=True
+            ).values()
             # use a small subset to prevent too long validation time
-            self.validset = (
-                dataset["validation"].shuffle(seed=self.cfg.seed).select(range(5000))
-            )
+            self.validset = validset
+            if self.cfg.merge_valid:
+                self.trainset = concatenate_datasets(
+                    [self.trainset, additional_trainset]
+                )
         else:
             self.testset = dataset["validation"]
 
@@ -77,23 +94,22 @@ class DataModule(pl.LightningDataModule):
         else:
             outputs = self.processor(images, masks, return_tensors="pt")
             for i, mask in enumerate(masks):
-                ignore_value = self.model_config.mask2former_config.ignore_value
                 if mask is None:
                     # note that in PIL image, the size is (W, H)
-                    masks[i] = torch.full(
+                    masks[i] = torch.zeros(
                         (images[i].size[1], images[i].size[0]),
-                        ignore_value,
+                        dtype=torch.uint8,
                     )
                 else:
                     # convert to binary mask with 0 and 1
-                    mask = self.processor.convert_to_binary_masks(mask)
-                    # reduce labels
-                    masks[i] = torch.where(mask == 0, ignore_value, mask - 1)
+                    masks[i] = self.processor.convert_to_binary_masks(mask)
 
         return {
             **outputs,
             "masks": masks,  # a list of (N, H_i, W_i) or None
-            "labels": labels,  # (N,) or None
+            "labels": (
+                torch.tensor(labels, dtype=torch.long) if labels is not None else None
+            ),  # (N,) or None
         }
 
     def test_dataloader(self):

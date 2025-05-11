@@ -2,13 +2,12 @@ defaults:
   - default
   - _self_
 
-lr: 3e-4
 weight_decay: 5e-2
 
-# sometimes we want to finetune backbone with a smaller learning rate
-# set to null to freeze backbone
-backbone_lr: null
+seg_lr: null # lr for seg head
+backbone_lr: null # sometimes we want to finetune backbone with a smaller learning rate
+lr: 3e-4 # default lr for other not specified params
 
-epoch: 5
+epoch: 1
 batch_size: 40
 accumulate_grad_batches: 3

@@ -39,6 +39,9 @@ class LoupeConfig(PretrainedConfig):
         # loupe configs - segmentation
         fpn_scales: list[int | float] = [0.5, 2, 4],
         freeze_seg=False,
+        tversky_alpha: float = 0.7,
+        seg_cls_focal_alpha: float = 0.8,
+        seg_pixel_focal_alpha: float = 0.2,
         mask2former_path: Optional[str] = None,
         mask2former_overrides: Optional[dict] = None,
         **kwargs,
@@ -55,13 +58,6 @@ class LoupeConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.hidden_dropout_prob = hidden_dropout_prob
         self.checkpoint_path = checkpoint_path
-        if checkpoint_path is not None and (
-            backbone_path is not None or mask2former_path is not None
-        ):
-            logger.warning(
-                "checkpoint_path is set, but backbone_path or mask2former_path is also set. "
-                "backbone_path and mask2former_path will be ignored."
-            )
 
         # backbone configs
         if all(backbone_name not in name for name in self.supported_backbone):
@@ -101,6 +97,9 @@ class LoupeConfig(PretrainedConfig):
             )
         self.freeze_seg = freeze_seg
         self.mask2former_path = mask2former_path
+        self.tversky_alpha = tversky_alpha
+        self.seg_cls_focal_alpha = seg_cls_focal_alpha
+        self.seg_pixel_focal_alpha = seg_pixel_focal_alpha
 
         # remaining configs
         self.hidden_size = self.backbone_config.width

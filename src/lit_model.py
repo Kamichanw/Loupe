@@ -42,7 +42,7 @@ class LitModel(pl.LightningModule):
         pixel_mask: Optional[torch.Tensor] = None,
         class_labels: Optional[torch.Tensor] = None,
         patch_labels: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None
+        labels: Optional[torch.Tensor] = None,
     ):
         """
         Forward pass for the model.
@@ -120,22 +120,35 @@ class LitModel(pl.LightningModule):
 
             return [*non_decay, *decay]
 
+        def set_hparam(param_dict, pattern: str, **common_args):
+            """set hparams for params that contains the pattern, and return the remaining param dict"""
+            selected_params = {n: p for n, p in param_dict.items() if pattern in n}
+            pe_optim_groups = filter_decay_params(selected_params, **common_args)
+            optim_groups.extend(pe_optim_groups)
+
+            # filter out the parameters in selected_params from param_dict
+            return {
+                n: p for n, p in param_dict.items() if n not in selected_params.keys()
+            }
+
         param_dict = {n: p for n, p in self.loupe.named_parameters() if p.requires_grad}
         optim_groups = []
 
         if self.cfg.hparams.backbone_lr:
-            pe_param_dict = {n: p for n, p in param_dict.items() if "backbone" in n}
-            pe_optim_groups = filter_decay_params(
-                pe_param_dict, lr=self.cfg.hparams.backbone_lr
+            param_dict = set_hparam(
+                param_dict, "backbone", lr=self.cfg.hparams.backbone_lr
             )
-            optim_groups.extend(pe_optim_groups)
 
-            # filter out the parameters in pe_param_dict from param_dict
-            param_dict = {
-                n: p for n, p in param_dict.items() if n not in pe_param_dict.keys()
-            }
+        if getattr(self.cfg.hparams, "cls_lr", None):
+            param_dict = set_hparam(
+                param_dict, "classifier", lr=self.cfg.hparams.cls_lr
+            )
 
-        optim_groups.extend(filter_decay_params(param_dict, lr=self.cfg.hparams.lr))
+        if getattr(self.cfg.hparams, "seg_lr", None):
+            param_dict = set_hparam(param_dict, "segmentor", lr=self.cfg.hparams.seg_lr)
+
+        if param_dict:
+            optim_groups.extend(filter_decay_params(param_dict, lr=self.cfg.hparams.lr))
 
         assert any(
             group["params"] is not None for group in optim_groups if "params" in group
@@ -233,9 +246,6 @@ class LitModel(pl.LightningModule):
         if "val_cls_loss" in self.val_outputs[0]:
             preds = torch.cat([o["cls_preds"] for o in self.val_outputs])
             targets = torch.cat([o["cls_targets"] for o in self.val_outputs])
-            best_threshold_f1, best_f1 = self.metric.find_best_threshold(
-                self.metric.compute_f1, preds, targets
-            )
             auc = self.metric.compute_auc(preds, targets)
             metric_dict.update(
                 {
@@ -243,8 +253,6 @@ class LitModel(pl.LightningModule):
                         [o["val_cls_loss"] for o in self.val_outputs]
                     ).mean(),
                     "auc": auc,
-                    "f1": best_f1,
-                    "f1_thres": best_threshold_f1,
                 }
             )
         if "val_seg_loss" in self.val_outputs[0]:
@@ -283,3 +291,15 @@ class LitModel(pl.LightningModule):
         self.log("f1_thres", best_threshold_f1, prog_bar=True, sync_dist=True)
         self.log("auc", auc, prog_bar=True, sync_dist=True)
         self.test_outputs.clear()
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["state_dict"] = {
+            name: param
+            for name, param in self.state_dict().items()
+            if param.requires_grad
+        }
+        return checkpoint
+
+    def on_load_checkpoint(self, checkpoint):
+        trainable_state_dict = checkpoint["state_dict"]
+        self.load_state_dict(trainable_state_dict, strict=False)
