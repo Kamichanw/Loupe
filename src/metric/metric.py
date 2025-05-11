@@ -58,7 +58,7 @@ class Metric:
                 # in predictions, 0 is for forged region, 1 is for background (no object class)
                 # so we need to invert the mask
                 pred = torch.where(pred == 0, 1, 0)
-                predictions.append(pred)
+                predictions.append(pred.to(dtype=torch.uint8))
                 references.append(target)
 
         return self.iou_metric.compute(
