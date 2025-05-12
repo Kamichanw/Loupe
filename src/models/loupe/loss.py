@@ -28,10 +28,7 @@ class Poly1FocalLoss(nn.Module):
     Args:
         epsilon (float): Coefficient for the poly1 penalty term.
         gamma (float): Focusing parameter for focal term.
-        alpha (float or Tensor or None): Class balancing weight.
-            - If float ∈ [0, 1], treated as scalar weight for foreground vs background (like binary).
-            - If Tensor of shape [num_classes], class-wise weights.
-            - If None, no weighting applied.
+        alpha (float): Class balancing weight for positive class.
         reduction (str): 'mean' | 'sum' | 'none' (default: 'mean').
 
     Inputs:
@@ -72,14 +69,13 @@ class Poly1FocalLoss(nn.Module):
         labels = labels.to(device=logits.device, dtype=logits.dtype)
 
         ce_loss = F.binary_cross_entropy_with_logits(
-            input=logits, target=labels, reduction="none"
+            input=logits,
+            target=labels,
+            reduction="none",
+            weight=self.alpha * labels + (1 - self.alpha) * (1 - labels),
         )
         pt = labels * p + (1 - labels) * (1 - p)
         FL = ce_loss * ((1 - pt) ** self.gamma)
-
-        if self.alpha >= 0:
-            alpha_t = self.alpha * labels + (1 - self.alpha) * (1 - labels)
-            FL = alpha_t * FL
 
         poly1 = FL + self.epsilon * torch.pow(1 - pt, self.gamma + 1)
 
@@ -91,81 +87,62 @@ class Poly1FocalLoss(nn.Module):
         return poly1
 
 
-def tversky_loss(
-    inputs: torch.Tensor,
-    labels: torch.Tensor,
-    num_masks: int,
-    alpha: float = 0.5,
-    beta: float = 0.5,
-    smooth: float = 1e-6,
-) -> torch.Tensor:
+class TverskyLoss(nn.Module):
     """
-    Tversky loss (generalized Dice loss) for binary masks.
-
+    Tversky loss for binary masks.
     Args:
-        inputs (Tensor): Raw logits from the model. Shape: [num_queries, H, W] or [B, Q, H, W]
-        labels (Tensor): Ground-truth masks (binary). Same shape as inputs.
-        num_masks (int): Number of ground-truth masks (used for averaging).
         alpha (float): Weight for false positives.
         beta (float): Weight for false negatives.
-        smooth (float): Small constant to avoid division by zero.
-
-    Returns:
-        Tensor: Scalar loss normalized by num_masks.
+        reduction (str): 'batchmean' | 'sum' | 'none' (default: 'batchmean').
     """
-    probs = inputs.sigmoid().flatten(1)  # [N, H*W]
-    labels = labels.flatten(1).float()  # Ensure float type
 
-    TP = (probs * labels).sum(-1)
-    FP = (probs * (1 - labels)).sum(-1)
-    FN = ((1 - probs) * labels).sum(-1)
+    def __init__(self, alpha=0.5, beta=0.5, reduction="batchmean"):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.reduction = reduction
 
-    tversky = (TP + smooth) / (TP + alpha * FP + beta * FN + smooth)
-    loss = 1.0 - tversky
+    def forward(self, inputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs (Tensor): Raw logits from the model.
+            labels (Tensor): Ground-truth masks (binary). Same shape as inputs.
+        Returns:
+            Tensor: Scalar loss.
+        """
+        probs = inputs.sigmoid().flatten(1)
+        labels = labels.flatten(1).float()
 
-    return loss.sum() / num_masks
+        TP = (probs * labels).sum(-1)
+        FP = (probs * (1 - labels)).sum(-1)
+        FN = ((1 - probs) * labels).sum(-1)
 
+        tversky = (TP + 1e-6) / (TP + self.alpha * FP + self.beta * FN + 1e-6)
+        loss = 1.0 - tversky
 
-def sigmoid_poly1_focal_loss(
-    inputs: torch.Tensor,
-    labels: torch.Tensor,
-    num_masks: int,
-    alpha: float = 0.25,
-    gamma: float = 2.0,
-    epsilon: float = 1.0,
-) -> torch.Tensor:
-    r"""
-    Args:
-        inputs (`torch.Tensor`):
-            A float tensor of arbitrary shape.
-        labels (`torch.Tensor`):
-            A tensor with the same shape as inputs. Stores the binary classification labels for each element in inputs
-            (0 for the negative class and 1 for the positive class).
-
-    Returns:
-        loss (`torch.Tensor`): The computed loss.
-    """
-    criterion = Poly1FocalLoss(
-        alpha=alpha, gamma=gamma, epsilon=epsilon, reduction="none"
-    )
-    poly1_loss = criterion(inputs, labels)
-
-    loss = poly1_loss.mean(1).sum() / num_masks
-    return loss
+        if self.reduction == "batchmean":
+            loss = loss.mean()
+        elif self.reduction == "sum":
+            loss = loss.sum()
+        return loss
 
 
 class LoupeClsLoss(nn.Module):
     def __init__(
         self,
-        epsilon: float = 1.0,
-        alpha: float = 0.25,
-        gamma: float = 2.0,
+        config: LoupeConfig,
     ):
         super(LoupeClsLoss, self).__init__()
         self.patch_wise_criterion = Poly1FocalLoss(
-            epsilon=epsilon, alpha=alpha, gamma=gamma
+            epsilon=1.0,
+            alpha=config.patch_forge_weight,
+            gamma=2.0,
         )
-        self.cls_criterion = nn.BCEWithLogitsLoss()
+        self.cls_criterion = Poly1FocalLoss(
+            epsilon=1.0,
+            alpha=config.cls_forge_weight,
+            gamma=2.0,
+        )
 
     def forward(
         self,
@@ -335,8 +312,16 @@ class LoupeSegLoss(Mask2FormerLoss):
             cost_dice=config.mask2former_config.dice_weight,
             num_points=config.mask2former_config.train_num_points,
         )
-        self.tversky_alpha = config.tversky_alpha
-        self.pixel_focal_alpha = config.seg_pixel_focal_alpha
+        self.pixel_mask_criterion = Poly1FocalLoss(
+            epsilon=config.pixel_poly_epsilon,
+            alpha=config.pixel_forge_weight,
+            gamma=2.0,
+        )
+        self.pixel_tversky_criterion = TverskyLoss(
+            alpha=config.tversky_alpha,
+            beta=1 - config.tversky_alpha,
+        )
+
         self.use_auxiliary_loss = config.mask2former_config.use_auxiliary_loss
 
     def loss_masks(
@@ -375,29 +360,22 @@ class LoupeSegLoss(Mask2FormerLoss):
         target_masks, _ = self._pad_images_to_max_in_batch(mask_labels)
         target_masks = target_masks[tgt_idx]
 
-        pred_masks = pred_masks[:, None]
         target_masks = F.interpolate(target_masks[:, None], size=pred_masks.shape[-2:])
 
+        loss_mask = self.pixel_mask_criterion(
+            pred_masks.view(num_masks, -1), target_masks.view(num_masks, -1)
+        )
+        loss_dice = self.pixel_tversky_criterion(pred_masks, target_masks)
+
         losses = {
-            "loss_mask": sigmoid_poly1_focal_loss(
-                pred_masks.view(num_masks, -1),
-                target_masks.view(num_masks, -1),
-                num_masks,
-                alpha=self.pixel_focal_alpha,
-            ),
-            "loss_dice": tversky_loss(
-                pred_masks.view(num_masks, -1),
-                target_masks.view(num_masks, -1),
-                num_masks,
-                self.tversky_alpha,
-                1 - self.tversky_alpha,
-            ),
+            "loss_mask": loss_mask,
+            "loss_dice": loss_dice,
         }
 
         del pred_masks
         del target_masks
         return losses
-    
+
     def forward(
         self,
         masks_queries_logits: torch.Tensor,
@@ -434,7 +412,9 @@ class LoupeSegLoss(Mask2FormerLoss):
         """
 
         # retrieve the matching between the outputs of the last layer and the labels
-        indices = self.matcher(masks_queries_logits, class_queries_logits, mask_labels, class_labels)
+        indices = self.matcher(
+            masks_queries_logits, class_queries_logits, mask_labels, class_labels
+        )
         # compute the average number of target masks for normalization purposes
         num_masks = self.get_num_masks(class_labels, device=class_labels[0].device)
         # get all the losses
@@ -447,7 +427,12 @@ class LoupeSegLoss(Mask2FormerLoss):
             for idx, aux_outputs in enumerate(auxiliary_predictions):
                 masks_queries_logits = aux_outputs["masks_queries_logits"]
                 class_queries_logits = aux_outputs["class_queries_logits"]
-                loss_dict = self.forward(masks_queries_logits, class_queries_logits, mask_labels, class_labels)
+                loss_dict = self.forward(
+                    masks_queries_logits,
+                    class_queries_logits,
+                    mask_labels,
+                    class_labels,
+                )
                 loss_dict = {f"{key}_{idx}": value for key, value in loss_dict.items()}
                 losses.update(loss_dict)
 
