@@ -1,3 +1,4 @@
+import re
 from typing import Optional
 
 from loguru import logger
@@ -35,6 +36,19 @@ class LitModel(pl.LightningModule):
                 "backbone_lr will be ignored."
             )
 
+        for ckpt_path in self.cfg.ckpt.checkpoint_paths:
+            if ckpt_path.endswith(".safetensors"):
+                from safetensors.torch import load_file
+
+                state_dict = load_file(ckpt_path)
+            elif ckpt_path.endswith(".pt") or ckpt_path.endswith(".pth"):
+                state_dict = torch.load(ckpt_path)
+            logger.info(f"Loading checkpoint from {ckpt_path}")
+            self.load_state_dict(
+                state_dict=state_dict,
+                strict=False,
+            )
+
     def forward(
         self,
         pixel_values: torch.Tensor,
@@ -43,7 +57,7 @@ class LitModel(pl.LightningModule):
         class_labels: Optional[torch.Tensor] = None,
         patch_labels: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
-    ):
+    ) -> LoupeUniversalOutput:
         """
         Forward pass for the model.
 
@@ -56,7 +70,7 @@ class LitModel(pl.LightningModule):
                 Only used if config.enable_patch_cls is True. Defaults to None.
             labels (Optional[torch.Tensor], optional): Labels with shape (N,), which is used to classify the image.
         """
-        output: LoupeUniversalOutput = self.loupe(
+        return self.loupe(
             pixel_values=pixel_values,
             mask_labels=mask_labels,
             pixel_mask=pixel_mask,
@@ -64,29 +78,23 @@ class LitModel(pl.LightningModule):
             patch_labels=patch_labels,
             labels=labels,
         )
-        loss_dict = {}
-        if output.cls_loss is not None:
-            loss_dict["loss"] = output.cls_loss
-            loss_dict["cls_loss"] = output.cls_loss
-        if output.seg_loss is not None:
-            if "loss" in loss_dict:
-                loss_dict["loss"] += output.seg_loss
-            else:
-                loss_dict["loss"] = output.seg_loss
-            loss_dict["seg_loss"] = output.seg_loss
-        return {
-            **loss_dict,
-            "cls_logits": output.cls_logits,
-            "class_queries_logits": output.class_queries_logits,
-            "masks_queries_logits": output.masks_queries_logits,
-        }
 
     def training_step(self, batch, batch_idx):
         outputs = self.forward(**batch)
-        loss_dict = {k: v for k, v in outputs.items() if "loss" in k}
-        self.log_dict(loss_dict, sync_dist=True, prog_bar=True)
 
-        return loss_dict["loss"]
+        loss_dict = {"total_loss": outputs.loss}
+        if "cls" in self.cfg.stage.name:
+            loss_dict["cls_loss"] = outputs.loss_dict["cls"]["loss"]
+        if "seg" in self.cfg.stage.name:
+            loss_dict["seg_loss"] = outputs.loss_dict["seg"].pop("loss")
+            loss_dict.update(outputs.loss_dict["seg"])
+
+        for key, value in loss_dict.items():
+            is_auxiliary_loss = re.search(r"_\d+$", key) is not None
+            # hide auxiliary loss from mask2former in the progress bar
+            self.log(key, value, prog_bar=not is_auxiliary_loss, sync_dist=True)
+
+        return outputs.loss
 
     def configure_optimizers(self):
         def filter_decay_params(param_dict, **common_args):
@@ -209,35 +217,42 @@ class LitModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         masks = batch.pop("masks")
-        outputs = self(**batch)
+        outputs = self.forward(**batch)
         val_output = {
-            "val_loss": outputs["loss"],
+            "val_loss": outputs.loss,
         }
-        if "cls_loss" in outputs:
+        if outputs.loss_dict["cls"] is not None:
             val_output.update(
                 {
-                    "val_cls_loss": outputs["cls_loss"],
+                    "val_cls_loss": outputs.loss_dict["cls"]["loss"],
                     "cls_preds": torch.sigmoid(outputs["cls_logits"]).squeeze(-1),
                     "cls_targets": batch["labels"],
                 }
             )
-        if "seg_loss" in outputs:
+        if outputs.loss_dict["seg"] is not None:
             target_sizes = [
                 (mask.shape[0], mask.shape[1]) for mask in masks
             ]  # (H_i, W_i)
+            # filter real images
+            preds = [
+                pred
+                for i, pred in enumerate(
+                    self.processor.post_process_segmentation(
+                        outputs, target_sizes=target_sizes
+                    )
+                )
+                if masks[i] is not None
+            ]
+            masks = [mask for mask in masks if mask is not None]
             val_output.update(
                 {
-                    "val_seg_loss": outputs["seg_loss"],
-                    "seg_preds": self.processor.post_process_segmentation(
-                        outputs["class_queries_logits"],
-                        outputs["masks_queries_logits"],
-                        target_sizes=target_sizes,
-                    ),
+                    "val_seg_loss": outputs.loss_dict["seg"]["loss"],
+                    "seg_preds": preds,
                     "seg_targets": masks,
                 }
             )
         self.val_outputs.append(val_output)
-        return outputs["loss"]
+        return outputs.loss
 
     def on_validation_epoch_end(self):
         metric_dict = {

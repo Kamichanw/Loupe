@@ -54,6 +54,9 @@ class LoupeSegmentationOutput(ModelOutput):
     Args:
         loss (`torch.Tensor`, *optional*):
             The computed loss, returned when labels are present.
+        loss_dict (`Dict[str, torch.FloatTensor]`, *optional*):
+            A dictionary of all loss values, including loss_cross_entropy, loss_dice,
+            and loss_mask.
         class_queries_logits (`torch.FloatTensor`):
             A tensor of shape `(batch_size, num_queries, 1 + 1)` representing the proposed classes for each
             query. Note the `+ 1` is needed because we incorporate the null class.
@@ -65,6 +68,7 @@ class LoupeSegmentationOutput(ModelOutput):
     """
 
     loss: Optional[torch.FloatTensor] = None
+    loss_dict: Optional[Dict[str, torch.FloatTensor]] = None
     masks_queries_logits: Optional[torch.FloatTensor] = None
     class_queries_logits: Optional[torch.FloatTensor] = None
     auxiliary_logits: Optional[List[Dict[str, torch.Tensor]]] = None
@@ -77,12 +81,24 @@ class LoupeUniversalOutput(ModelOutput):
     Class for Loupe universal outputs.
 
     Args:
-        cls_loss (`torch.FloatTensor`, *optional*):
-            The classification loss from LoupeClassificationOutput.
-        cls_logits (`torch.FloatTensor`, *optional*):
-            Classification logits from LoupeClassificationOutput.
-        seg_loss (`torch.FloatTensor`, *optional*):
-            The segmentation loss from LoupeSegmentationOutput.
+        loss (`torch.FloatTensor`, *optional*):
+            The classification and segmentation loss from LoupeUniversalOutput.
+        loss_dict (`Dict[str, Dict[str, torch.FloatTensor]]`, *optional*):
+            A dictionary of all loss values, with the following structure:
+        ```python
+        {
+            "cls": {
+                "loss": a float tensor,
+            },
+            "seg: {
+                "loss": a float tensor,
+                "loss_mask": a float tensor,
+                "loss_dice": a float tensor,
+                "loss_cross_entropy": a float tensor,
+            }
+        }
+        ```
+
         class_queries_logits (`torch.FloatTensor`, *optional*):
             A tensor of shape `(batch_size, num_queries, 1 + 1)` representing the proposed classes for each
             query. Note the `+ 1` is needed because we incorporate the null class.
@@ -91,9 +107,9 @@ class LoupeUniversalOutput(ModelOutput):
             query.
     """
 
-    cls_loss: Optional[torch.FloatTensor] = None
+    loss: Optional[torch.FloatTensor] = None
+    loss_dict: Optional[Dict[str, Dict[str, torch.FloatTensor]]] = None
     cls_logits: Optional[torch.FloatTensor] = None
-    seg_loss: Optional[torch.FloatTensor] = None
     class_queries_logits: Optional[torch.FloatTensor] = None
     masks_queries_logits: Optional[torch.FloatTensor] = None
 
@@ -299,41 +315,41 @@ class LoupeClassifier(nn.Module):
         # features: (batch_size, cls_token + num_patches, output_dim)
 
         loss, logits, patch_logits = None, None, None
-        if labels is not None:
-            # regular classification
-            if self.config.backbone_config.pool_type in ["attn", "avg", "tok"]:
-                # output: (batch_size, output_dim)
-                global_logits = self.classifier(pooled_features)
+        # regular classification
+        if self.config.backbone_config.pool_type in ["attn", "avg", "tok"]:
+            # output: (batch_size, output_dim)
+            global_logits = self.classifier(pooled_features)
+        else:
+            if self.config.backbone_config.use_cls_token:
+                # output: (batch_size, cls_token + num_patches, output_dim)
+                global_logits = self.classifier(pooled_features[:, 0, :])
             else:
-                if self.config.backbone_config.use_cls_token:
-                    # output: (batch_size, cls_token + num_patches, output_dim)
-                    global_logits = self.classifier(pooled_features[:, 0, :])
-                else:
-                    raise ValueError(
-                        "pool_type cannot be none when use_cls_token is False"
-                    )
-            # global_logits: (batch_size, 1)
-
-            # patch classification
-            if self.config.enable_patch_cls:
-                patch_features = (
-                    features[:, 1:, :]
-                    if self.config.backbone_config.use_cls_token
-                    else features
+                raise ValueError(
+                    "pool_type cannot be none when use_cls_token is False"
                 )
-                # patch_logits: (batch_size, num_patches, 1)
-                patch_logits = self.patch_classifier(patch_features)
-                if self.config.enable_cls_fusion:
-                    logits = self.fuser(
-                        torch.cat([global_logits, patch_logits.squeeze(-1)], dim=1)
-                    )
-                else:
-                    # regular cls loss will only be on the global logits
-                    logits = global_logits
-            else:
-                logits = global_logits
-            # logits: (batch_size, 1)
+        # global_logits: (batch_size, 1)
 
+        # patch classification
+        if self.config.enable_patch_cls:
+            patch_features = (
+                features[:, 1:, :]
+                if self.config.backbone_config.use_cls_token
+                else features
+            )
+            # patch_logits: (batch_size, num_patches, 1)
+            patch_logits = self.patch_classifier(patch_features)
+            if self.config.enable_cls_fusion:
+                logits = self.fuser(
+                    torch.cat([global_logits, patch_logits.squeeze(-1)], dim=1)
+                )
+            else:
+                # regular cls loss will only be on the global logits
+                logits = global_logits
+        else:
+            logits = global_logits
+        # logits: (batch_size, 1)
+
+        if labels is not None:
             loss = self.criterion(
                 cls_logits=logits,
                 cls_labels=labels,
@@ -386,6 +402,11 @@ class LoupeSegmentor(nn.Module):
         class_labels: torch.Tensor,
         auxiliary_predictions: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
+        """
+        Modified from transformers.models.mask2former.modeling_mask2former.Mask2FormerForUniversalSegmentation.
+        Unlike the original implementation, we move weighted loss calculation to the
+        `get_loss` method to return plain losses.
+        """
         loss_dict: Dict[str, torch.Tensor] = self.criterion(
             masks_queries_logits=masks_queries_logits,
             class_queries_logits=class_queries_logits,
@@ -393,16 +414,14 @@ class LoupeSegmentor(nn.Module):
             class_labels=class_labels,
             auxiliary_predictions=auxiliary_predictions,
         )
+        return loss_dict
 
+    def get_loss(self, loss_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         # weight each loss by `self.weight_dict[<LOSS_NAME>]` including auxiliary losses
         for key, weight in self.criterion.weight_dict.items():
             for loss_key, loss in loss_dict.items():
                 if key in loss_key:
                     loss *= weight
-
-        return loss_dict
-
-    def get_loss(self, loss_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         return sum(loss_dict.values())
 
     def get_auxiliary_logits(self, classes: torch.Tensor, output_masks: torch.Tensor):
@@ -461,10 +480,12 @@ class LoupeSegmentor(nn.Module):
                 class_labels=class_labels,
                 auxiliary_predictions=auxiliary_logits,
             )
+            raw_loss_dict = {k: v.item() for k, v in loss_dict.items()}
             loss = self.get_loss(loss_dict)
 
         return LoupeSegmentationOutput(
             loss=loss,
+            loss_dict=raw_loss_dict,
             class_queries_logits=class_queries_logits[-1],
             masks_queries_logits=masks_queries_logits[-1],
             auxiliary_logits=auxiliary_logits,
@@ -581,7 +602,7 @@ class LoupeModel(LoupePreTrainedModel):
 
             if not path.endswith(".safetensors"):
                 raise ValueError(f"Checkpoint {path} is not a safetensors file.")
-            
+
             from safetensors.torch import load_file
 
             state_dict = load_file(path)
@@ -597,10 +618,6 @@ class LoupeModel(LoupePreTrainedModel):
                 self.backbone.load_ckpt(config.backbone_path)
             elif config.backbone_path.endswith(".safetensors"):
                 load_from_safetensors(config.backbone_path)
-        
-        if config.checkpoint_path and config.checkpoint_path.endswith(".safetensors"):
-            logger.info(f"Loading checkpoint from {config.checkpoint_path}")
-            load_from_safetensors(config.checkpoint_path)
 
     def cls_forward(
         self,
@@ -690,6 +707,10 @@ class LoupeModel(LoupePreTrainedModel):
             None,
             None,
         )
+        loss_dict = {
+            "cls": None,
+            "seg": None,
+        }
 
         def reshape_features(features: torch.Tensor) -> torch.Tensor:
             if self.config.backbone_config.use_cls_token:
@@ -710,24 +731,25 @@ class LoupeModel(LoupePreTrainedModel):
         features = self.backbone.forward_features(pixel_values, norm=True)
         pooled_features = self.backbone._pool(features)
         if self.config.stage == "cls":
-            output = self.cls_forward(
+            cls_output = self.cls_forward(
                 features=features,
                 pooled_features=pooled_features,
                 labels=labels,
                 patch_labels=patch_labels,
             )
-            cls_loss = output.loss
-            cls_logits = output.logits
+            cls_loss = cls_output.loss
+            cls_logits = cls_output.logits
+            loss_dict["cls"] = {"loss": cls_loss}
         elif self.config.stage == "seg":
-            output = self.seg_forward(
+            seg_output = self.seg_forward(
                 features=reshape_features(features),
                 pixel_mask=pixel_mask,
                 mask_labels=mask_labels,
                 class_labels=class_labels,
             )
-            seg_loss = output.loss
-            masks_queries_logits = output.masks_queries_logits
-            class_queries_logits = output.class_queries_logits
+            seg_loss = seg_output.loss
+            masks_queries_logits = seg_output.masks_queries_logits
+            class_queries_logits = seg_output.class_queries_logits
         else:
             cls_output = self.cls_forward(
                 features=features,
@@ -747,10 +769,29 @@ class LoupeModel(LoupePreTrainedModel):
             masks_queries_logits = seg_output.masks_queries_logits
             class_queries_logits = seg_output.class_queries_logits
 
+        if cls_loss is not None:
+            loss_dict["cls"] = {"loss": cls_loss}
+
+        if seg_loss is not None:
+            loss_dict["seg"] = {
+                "loss": seg_loss,
+                **seg_output.loss_dict,
+            }
+
+        loss = None
+        if cls_loss is not None:
+            loss = self.config.cls_loss_weight * cls_loss
+        if seg_loss is not None:
+            seg_loss = self.config.seg_loss_weight * seg_loss
+            if loss is None:
+                loss = seg_loss
+            else:
+                loss += seg_loss
+
         return LoupeUniversalOutput(
-            cls_loss=cls_loss,
+            loss=loss,
+            loss_dict=loss_dict,
             cls_logits=cls_logits,
-            seg_loss=seg_loss,
             masks_queries_logits=masks_queries_logits,
             class_queries_logits=class_queries_logits,
         )

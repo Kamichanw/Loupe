@@ -337,6 +337,7 @@ class LoupeSegLoss(Mask2FormerLoss):
         )
         self.tversky_alpha = config.tversky_alpha
         self.pixel_focal_alpha = config.seg_pixel_focal_alpha
+        self.use_auxiliary_loss = config.mask2former_config.use_auxiliary_loss
 
     def loss_masks(
         self,
@@ -364,6 +365,7 @@ class LoupeSegLoss(Mask2FormerLoss):
             - **loss_dice** -- The loss computed using dice loss on the predicted on the predicted and ground truth,
               masks.
         """
+        num_masks = int(num_masks)
         src_idx = self._get_predictions_permutation_indices(indices)
         tgt_idx = self._get_targets_permutation_indices(indices)
         # shape (batch_size * num_queries, height, width)
@@ -373,38 +375,19 @@ class LoupeSegLoss(Mask2FormerLoss):
         target_masks, _ = self._pad_images_to_max_in_batch(mask_labels)
         target_masks = target_masks[tgt_idx]
 
-        # No need to upsample predictions as we are using normalized coordinates
         pred_masks = pred_masks[:, None]
-        target_masks = target_masks[:, None]
-
-        # Sample point coordinates
-        with torch.no_grad():
-            point_coordinates = self.sample_points_using_uncertainty(
-                pred_masks,
-                lambda logits: self.calculate_uncertainty(logits),
-                self.num_points,
-                self.oversample_ratio,
-                self.importance_sample_ratio,
-            )
-
-            point_labels = sample_point(
-                target_masks, point_coordinates, align_corners=False
-            ).squeeze(1)
-
-        point_logits = sample_point(
-            pred_masks, point_coordinates, align_corners=False
-        ).squeeze(1)
+        target_masks = F.interpolate(target_masks[:, None], size=pred_masks.shape[-2:])
 
         losses = {
             "loss_mask": sigmoid_poly1_focal_loss(
-                point_logits,
-                point_labels,
+                pred_masks.view(num_masks, -1),
+                target_masks.view(num_masks, -1),
                 num_masks,
                 alpha=self.pixel_focal_alpha,
             ),
             "loss_dice": tversky_loss(
-                point_logits,
-                point_labels,
+                pred_masks.view(num_masks, -1),
+                target_masks.view(num_masks, -1),
                 num_masks,
                 self.tversky_alpha,
                 1 - self.tversky_alpha,
@@ -413,6 +396,61 @@ class LoupeSegLoss(Mask2FormerLoss):
 
         del pred_masks
         del target_masks
+        return losses
+    
+    def forward(
+        self,
+        masks_queries_logits: torch.Tensor,
+        class_queries_logits: torch.Tensor,
+        mask_labels: List[torch.Tensor],
+        class_labels: List[torch.Tensor],
+        auxiliary_predictions: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        This performs the loss computation.
+
+        Args:
+            masks_queries_logits (`torch.Tensor`):
+                A tensor of shape `(batch_size, num_queries, height, width)`.
+            class_queries_logits (`torch.Tensor`):
+                A tensor of shape `(batch_size, num_queries, num_labels)`.
+            mask_labels (`torch.Tensor`):
+                List of mask labels of shape `(labels, height, width)`.
+            class_labels (`List[torch.Tensor]`):
+                List of class labels of shape `(labels)`.
+            auxiliary_predictions (`Dict[str, torch.Tensor]`, *optional*):
+                if `use_auxiliary_loss` was set to `true` in [`Mask2FormerConfig`], then it contains the logits from
+                the inner layers of the Mask2FormerMaskedAttentionDecoder.
+
+        Returns:
+            losses (`Dict[str, Tensor]`): A dict of `torch.Tensor` containing three keys:
+            - **loss_cross_entropy** -- The loss computed using cross entropy on the predicted and ground truth labels.
+            - **loss_mask** -- The loss computed using sigmoid cross_entropy loss on the predicted and ground truth
+              masks.
+            - **loss_dice** -- The loss computed using dice loss on the predicted on the predicted and ground truth
+              masks.
+            if `use_auxiliary_loss` was set to `true` in [`Mask2FormerConfig`], the dictionary contains additional
+            losses for each auxiliary predictions.
+        """
+
+        # retrieve the matching between the outputs of the last layer and the labels
+        indices = self.matcher(masks_queries_logits, class_queries_logits, mask_labels, class_labels)
+        # compute the average number of target masks for normalization purposes
+        num_masks = self.get_num_masks(class_labels, device=class_labels[0].device)
+        # get all the losses
+        losses: Dict[str, torch.Tensor] = {
+            **self.loss_masks(masks_queries_logits, mask_labels, indices, num_masks),
+            **self.loss_labels(class_queries_logits, class_labels, indices),
+        }
+        # in case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+        if self.use_auxiliary_loss and auxiliary_predictions is not None:
+            for idx, aux_outputs in enumerate(auxiliary_predictions):
+                masks_queries_logits = aux_outputs["masks_queries_logits"]
+                class_queries_logits = aux_outputs["class_queries_logits"]
+                loss_dict = self.forward(masks_queries_logits, class_queries_logits, mask_labels, class_labels)
+                loss_dict = {f"{key}_{idx}": value for key, value in loss_dict.items()}
+                losses.update(loss_dict)
+
         return losses
 
     def sample_points_using_uncertainty(

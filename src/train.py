@@ -23,14 +23,7 @@ from lit_model import LitModel
 sys.path.insert(0, ".")
 project_root = Path(__file__).resolve().parent.parent
 save_path = os.environ.get("CATTINO_TASK_HOME", f"{project_root}/results")
-checkpoint_callback = ModelCheckpoint(
-    dirpath=os.path.join(save_path, "checkpoints"),
-    filename="loupe-{epoch}-{val_loss:.4f}",
-    monitor="val_loss",
-    mode="min",
-    save_top_k=1,
-    save_last=True,
-)
+checkpoint_callback: ModelCheckpoint
 
 
 @rank_zero_only
@@ -72,7 +65,11 @@ def convert_deepspeed_checkpoint(cfg: DictConfig):
 )
 def main(cfg: DictConfig):
     pl.seed_everything(cfg.seed)
-
+    global checkpoint_callback
+    checkpoint_callback = hydra.utils.instantiate(
+        cfg.ckpt.saver,
+        dirpath=os.path.join(save_path, "checkpoints"),
+    )
     logger = TensorBoardLogger(
         save_dir=save_path,
         name="logs",

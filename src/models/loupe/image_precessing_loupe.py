@@ -13,6 +13,7 @@ from transformers.image_utils import (
     ImageInput,
 )
 
+from .modeling_loupe import LoupeUniversalOutput
 from .configuration_loupe import LoupeConfig
 
 NonableImageInput = Union[
@@ -153,10 +154,9 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
 
     def post_process_segmentation(
         self,
-        class_queries_logits: torch.Tensor,
-        masks_queries_logits: torch.Tensor,
+        outputs: LoupeUniversalOutput,
         target_sizes: Optional[List[Tuple[int, int]]] = None,
-    ) -> "torch.Tensor":
+    ) -> List[torch.Tensor]:
         """
         Converts the output of [`LoupeUniversalOutput`] into semantic segmentation maps. Only supports
         PyTorch.
@@ -175,6 +175,9 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
                 corresponding to the target_sizes entry (if `target_sizes` is specified). Each entry of each
                 `torch.Tensor` correspond to a semantic class id.
         """
+        masks_queries_logits = outputs.masks_queries_logits
+        class_queries_logits = outputs.class_queries_logits
+
         # Scale back to preprocessed image size - (384, 384) for all models
         masks_queries_logits = F.interpolate(
             masks_queries_logits, size=(384, 384), mode="bilinear", align_corners=False

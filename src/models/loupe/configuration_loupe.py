@@ -24,7 +24,6 @@ class LoupeConfig(PretrainedConfig):
         hidden_act="gelu",
         hidden_dropout_prob=0.1,
         initializer_range=0.02,
-        checkpoint_path: Optional[str] = None,
         # backbone configs
         backbone_name: str = "PE-Core-L14-336",
         backbone_path: Optional[str] = None,
@@ -36,13 +35,14 @@ class LoupeConfig(PretrainedConfig):
         enable_cls_fusion=True,
         freeze_backbone=False,
         freeze_cls=False,
+        cls_loss_weight=1.0,
         # loupe configs - segmentation
         fpn_scales: list[int | float] = [0.5, 2, 4],
         freeze_seg=False,
         tversky_alpha: float = 0.7,
         seg_cls_focal_alpha: float = 0.8,
         seg_pixel_focal_alpha: float = 0.2,
-        mask2former_path: Optional[str] = None,
+        seg_loss_weight=1.0,
         mask2former_overrides: Optional[dict] = None,
         **kwargs,
     ):
@@ -57,7 +57,6 @@ class LoupeConfig(PretrainedConfig):
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
         self.hidden_dropout_prob = hidden_dropout_prob
-        self.checkpoint_path = checkpoint_path
 
         # backbone configs
         if all(backbone_name not in name for name in self.supported_backbone):
@@ -87,6 +86,7 @@ class LoupeConfig(PretrainedConfig):
         self.enable_cls_fusion = enable_cls_fusion
         self.freeze_backbone = freeze_backbone
         self.freeze_cls = freeze_cls
+        self.cls_loss_weight = cls_loss_weight
 
         # loupe configs - segmentation
         self.fpn_scales = sorted(fpn_scales + [1])  # add 1x scale
@@ -96,10 +96,10 @@ class LoupeConfig(PretrainedConfig):
                 "enable_cls_fusion will be ignored."
             )
         self.freeze_seg = freeze_seg
-        self.mask2former_path = mask2former_path
         self.tversky_alpha = tversky_alpha
         self.seg_cls_focal_alpha = seg_cls_focal_alpha
         self.seg_pixel_focal_alpha = seg_pixel_focal_alpha
+        self.seg_loss_weight = seg_loss_weight
 
         # remaining configs
         self.hidden_size = self.backbone_config.width

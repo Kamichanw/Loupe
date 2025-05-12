@@ -2,7 +2,6 @@
 hidden_act: "gelu"
 hidden_dropout_prob: 0.1
 initializer_range: 0.02
-checkpoint_path: null
 
 # backbone configs
 backbone_name: PE-Core-L14-336

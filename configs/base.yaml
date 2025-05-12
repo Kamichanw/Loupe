@@ -4,6 +4,7 @@ defaults:
   - stage: null # options: "cls" / "seg" / "cls_seg" / "test"
   - model: ${stage}  
   - hparams: ${stage} 
+  - ckpt: ${stage}
 
 seed: 42
 precision: bf16-mixed
