@@ -50,8 +50,8 @@ class Poly1FocalLoss(nn.Module):
 
     def forward(self, logits: torch.Tensor, labels: torch.Tensor):
         p = torch.sigmoid(logits)
-        num_classes = logits.shape[1]
         if labels.dtype == torch.long:
+            num_classes = logits.shape[1]
             # if labels are of shape [N]
             # convert to one-hot tensor of shape [N, num_classes]
             if labels.ndim == 1:
@@ -64,6 +64,11 @@ class Poly1FocalLoss(nn.Module):
                     F.one_hot(labels.unsqueeze(1), num_classes)
                     .transpose(1, -1)
                     .squeeze_(-1)
+                )
+        else:
+            if labels.shape != logits.shape:
+                raise ValueError(
+                    f"Shape mismatch: logits {logits.shape} and labels {labels.shape}."
                 )
 
         labels = labels.to(device=logits.device, dtype=logits.dtype)
@@ -361,16 +366,13 @@ class LoupeSegLoss(Mask2FormerLoss):
         target_masks = target_masks[tgt_idx]
 
         target_masks = F.interpolate(target_masks[:, None], size=pred_masks.shape[-2:])
-
-        loss_mask = self.pixel_mask_criterion(
-            pred_masks.view(num_masks, -1), target_masks.view(num_masks, -1)
-        )
-        loss_dice = self.pixel_tversky_criterion(pred_masks, target_masks)
-
-        losses = {
-            "loss_mask": loss_mask,
-            "loss_dice": loss_dice,
-        }
+        losses = {}
+        if self.weight_dict["loss_mask"] > 0:
+            losses["loss_mask"] = self.pixel_mask_criterion(
+                pred_masks.view(num_masks, -1), target_masks.view(num_masks, -1)
+            )
+        if self.weight_dict["loss_dice"] > 0:
+            losses["loss_dice"] = self.pixel_tversky_criterion(pred_masks, target_masks)
 
         del pred_masks
         del target_masks

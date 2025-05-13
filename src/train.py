@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 import sys
 import hydra
@@ -11,10 +12,13 @@ from pytorch_lightning.callbacks import (
     ModelCheckpoint,
 )
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
+from pytorch_lightning.utilities.deepspeed import (
+    convert_zero_checkpoint_to_fp32_state_dict,
+)
 from pytorch_lightning.loggers import TensorBoardLogger
 from omegaconf import DictConfig
 from pathlib import Path
-
+from safetensors.torch import save_file
 
 from models.loupe import LoupeModel, LoupeConfig
 from data_module import DataModule
@@ -28,8 +32,12 @@ checkpoint_callback: ModelCheckpoint
 
 @rank_zero_only
 def convert_deepspeed_checkpoint(cfg: DictConfig):
-    converted_save_path = os.path.join(project_root, "checkpoints", cfg.stage.name)
-    if os.path.isdir(converted_save_path) and os.listdir(converted_save_path):
+    """
+    Convert deepspeed checkpoint to fp32 safetensors format.
+    All frozen parameters will be removed.
+    """
+    converted_save_dir = os.path.join(project_root, "checkpoints", cfg.stage.name)
+    if os.path.isdir(converted_save_dir) and os.listdir(converted_save_dir):
         exist_dirs = [
             os.path.join(project_root, "checkpoints", d)
             for d in os.listdir(os.path.join(project_root, "checkpoints"))
@@ -41,21 +49,31 @@ def convert_deepspeed_checkpoint(cfg: DictConfig):
             " ".join(os.path.basename(d) for d in exist_dirs),
         )
         max_num = max(map(int, nums)) if nums else 0
-        converted_save_path += f"_{max_num + 1}"
-    result = subprocess.run(
-        [
-            sys.executable,
-            os.path.join(checkpoint_callback.best_model_path, "zero_to_fp32.py"),
-            checkpoint_callback.best_model_path,
-            converted_save_path,
-            "--safe_serialization",
-        ]
+        converted_save_dir += f"_{max_num + 1}"
+    os.makedirs(converted_save_dir, exist_ok=True)
+    convert_zero_checkpoint_to_fp32_state_dict(
+        checkpoint_callback.best_model_path,
+        os.path.join(converted_save_dir, "fp32_state_dict.pth"),
     )
-    if result.returncode != 0:
-        print("Error converting model to FP32.")
-        sys.exit(1)
-    else:
-        print(f"Model converted to FP32 and saved to {converted_save_path}.")
+    ckpt = torch.load(
+        os.path.join(converted_save_dir, "fp32_state_dict.pth"),
+        map_location="cpu",
+        weights_only=True,
+    )
+    for param in list(ckpt["state_dict"].keys()):
+        if getattr(cfg.model, "freeze_backbone", False) and param.startswith("loupe.backbone"):
+            ckpt["state_dict"].pop(param)
+        if getattr(cfg.model, "freeze_cls", False) and param.startswith("loupe.classifier"):
+            ckpt["state_dict"].pop(param)
+        if getattr(cfg.model, "freeze_seg", False) and param.startswith("loupe.segmentor"):
+            ckpt["state_dict"].pop(param)
+    save_file(ckpt["state_dict"], os.path.join(converted_save_dir, "model.safetensors"))
+    print(f"Model converted to FP32 and saved to {converted_save_dir}.")
+
+    os.remove(
+        os.path.join(converted_save_dir, "fp32_state_dict.pth")
+    )
+    shutil.rmtree(checkpoint_callback.best_model_path)
 
 
 @hydra.main(
@@ -73,6 +91,7 @@ def main(cfg: DictConfig):
     logger = TensorBoardLogger(
         save_dir=save_path,
         name="logs",
+        sub_dir=cfg.stage.name,
         default_hp_metric=False,
     )
     trainer = pl.Trainer(

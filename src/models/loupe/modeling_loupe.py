@@ -293,7 +293,7 @@ class LoupeClassifier(nn.Module):
             )
             if config.enable_cls_fusion:
                 self.fuser = FuseHead(config)
-        self.criterion = LoupeClsLoss()
+        self.criterion = LoupeClsLoss(config)
 
         if config.freeze_cls:
             for param in self.classifier.parameters():

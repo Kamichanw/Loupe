@@ -8,18 +8,17 @@ freeze_seg: False
 # tversky alpha and beta control the weight of false positive and false negative, respectively
 # the tversky beta is set to 1 - alpha
 tversky_alpha: 0.7
-# alpha for focal loss on mask prediction, 1 for foreground and 0 for background
-# a bigger alpha means more focus on the foreground, i.e., the forged pixels
-pixel_forge_weight: 0.1
+# weight for forged pixels, set between 0 and 1
+pixel_forge_weight: 0.9
 # epsilon for poly1 focal loss
-pixel_poly_epsilon: -1.0
+pixel_poly_epsilon: 1.0
 # backbone_path: /gemini/code/loupe/checkpoints/cls/model.safetensors # if can also be a path to a cls checkpoint
 
 # mask2former overrides, you can set attr to '-' to use default value
 # visit https://huggingface.co/docs/transformers/main/model_doc/mask2former#transformers.Mask2FormerConfig for available overrides
 mask2former_overrides:
   num_queries: 10
-  mask_weight: 1
+  mask_weight: 0
   class_weight: 2
   dice_weight: 5
   # use_auxiliary_loss: False

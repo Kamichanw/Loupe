@@ -3,6 +3,6 @@ defaults:
   - _self_
 
 saver:
-  filename: "loupe-{epoch}-{iou:.4f}"
+  filename: "loupe-{iou:.4f}"
   monitor: iou  
   mode: max

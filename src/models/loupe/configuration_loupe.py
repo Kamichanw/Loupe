@@ -35,15 +35,16 @@ class LoupeConfig(PretrainedConfig):
         enable_cls_fusion=True,
         freeze_backbone=False,
         freeze_cls=False,
-        cls_forge_weight=0.25,
-        patch_forge_weight=0.1,
+        cls_forge_weight=0.8,
+        patch_forge_weight=0.8,
         cls_loss_weight=1.0,
         # loupe configs - segmentation
         fpn_scales: list[int | float] = [0.5, 2, 4],
         freeze_seg=False,
         tversky_alpha: float = 0.7,
-        pixel_forge_weight: float = 0.1,
-        pixel_poly_epsilon: float = -1.0,
+        queries_forge_weight: float = 0.9,
+        pixel_forge_weight: float = 0.9,
+        pixel_poly_epsilon: float = 1.0,
         seg_loss_weight=1.0,
         mask2former_overrides: Optional[dict] = None,
         **kwargs,
@@ -101,6 +102,7 @@ class LoupeConfig(PretrainedConfig):
             )
         self.freeze_seg = freeze_seg
         self.tversky_alpha = tversky_alpha
+        self.queries_forge_weight = queries_forge_weight
         self.pixel_forge_weight = pixel_forge_weight
         self.pixel_poly_epsilon = pixel_poly_epsilon
         self.seg_loss_weight = seg_loss_weight

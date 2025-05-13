@@ -233,21 +233,12 @@ class LitModel(pl.LightningModule):
             target_sizes = [
                 (mask.shape[0], mask.shape[1]) for mask in masks
             ]  # (H_i, W_i)
-            # filter real images
-            preds = [
-                pred
-                for i, pred in enumerate(
-                    self.processor.post_process_segmentation(
-                        outputs, target_sizes=target_sizes
-                    )
-                )
-                if masks[i] is not None
-            ]
-            masks = [mask for mask in masks if mask is not None]
             val_output.update(
                 {
                     "val_seg_loss": outputs.loss_dict["seg"]["loss"],
-                    "seg_preds": preds,
+                    "seg_preds": self.processor.post_process_segmentation(
+                        outputs, target_sizes=target_sizes
+                    ),
                     "seg_targets": masks,
                 }
             )
@@ -306,15 +297,3 @@ class LitModel(pl.LightningModule):
         self.log("f1_thres", best_threshold_f1, prog_bar=True, sync_dist=True)
         self.log("auc", auc, prog_bar=True, sync_dist=True)
         self.test_outputs.clear()
-
-    def on_save_checkpoint(self, checkpoint):
-        checkpoint["state_dict"] = {
-            name: param
-            for name, param in self.state_dict().items()
-            if param.requires_grad
-        }
-        return checkpoint
-
-    def on_load_checkpoint(self, checkpoint):
-        trainable_state_dict = checkpoint["state_dict"]
-        self.load_state_dict(trainable_state_dict, strict=False)

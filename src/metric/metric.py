@@ -50,9 +50,20 @@ class Metric:
         targets: List[torch.Tensor],
         reduce_labels: bool = False,
     ) -> float:
+        predictions = []
+        references = []
+        for pred, target in zip(preds, targets):
+            # skip real images
+            if not torch.all(target == 0):
+                # in predictions, 0 is for forged region, 1 is for background (no object class)
+                # so we need to invert the mask
+                pred = torch.where(pred == 0, 1, 0)
+                predictions.append(pred.to(dtype=torch.uint8))
+                references.append(target)
+
         return self.iou_metric.compute(
-            predictions=preds,
-            references=targets,
+            predictions=predictions,
+            references=references,
             num_labels=2,
             ignore_index=255,
             reduce_labels=reduce_labels,
