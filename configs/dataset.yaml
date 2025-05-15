@@ -1,5 +1,0 @@
-data_dir: /gemini/space/jyc/track1
-
-num_workers: 8
-merge_valid: False # whether to merge valid set into train set
-valid_size: 5000 # float between 0 and 1 or int representing the number of samples

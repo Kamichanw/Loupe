@@ -1,3 +1,0 @@
-# list of checkpoints to load, the latter will override the former
-# must end with .safetensors or .pt/.pth
-checkpoint_paths: []

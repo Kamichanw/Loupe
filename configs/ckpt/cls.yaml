@@ -1,8 +1,0 @@
-defaults:
-  - default
-  - _self_
-
-saver:
-  filename: "cls-{auc:.4f}"
-  monitor: auc  
-  mode: max

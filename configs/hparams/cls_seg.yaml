@@ -1,6 +1,0 @@
-defaults:
-  - cls
-  - seg
-  - _self_
-
-batch_size: 32
