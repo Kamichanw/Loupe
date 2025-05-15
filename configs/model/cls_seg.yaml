@@ -2,3 +2,7 @@ defaults:
   - cls
   - seg
   - _self_
+
+freeze_backbone: False
+freeze_cls: False
+freeze_seg: False

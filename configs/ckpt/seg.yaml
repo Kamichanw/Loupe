@@ -3,6 +3,6 @@ defaults:
   - _self_
 
 saver:
-  filename: "loupe-{iou:.4f}"
+  filename: "seg-{f1:.4f}-{iou:.4f}"
   monitor: iou  
   mode: max

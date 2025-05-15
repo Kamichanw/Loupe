@@ -18,7 +18,7 @@ from models.loupe import LoupeModel
 from models.loupe.image_precessing_loupe import LoupeImageProcessor
 from models.loupe.modeling_loupe import LoupeUniversalOutput
 
-
+torch.serialization.add_safe_globals([set])
 class LitModel(pl.LightningModule):
     def __init__(self, cfg: DictConfig, loupe: LoupeModel) -> None:
         super().__init__()
@@ -28,7 +28,6 @@ class LitModel(pl.LightningModule):
         self.processor = LoupeImageProcessor(self.model_config)
         self.metric = Metric()
         self.val_outputs = []
-        self.test_outputs = []
 
         if self.cfg.hparams.backbone_lr and self.cfg.model.freeze_backbone:
             logger.warning(
@@ -162,7 +161,7 @@ class LitModel(pl.LightningModule):
             group["params"] is not None for group in optim_groups if "params" in group
         ), "No parameter to optimize."
 
-        if "deepspeed" in self.cfg.strategy:
+        if self.cfg.strategy and "deepspeed" in self.cfg.strategy:
             optimizer = DeepSpeedCPUAdam(
                 optim_groups,
                 weight_decay=self.cfg.hparams.weight_decay,
@@ -265,14 +264,21 @@ class LitModel(pl.LightningModule):
             preds = [p for o in self.val_outputs for p in o["seg_preds"]]
             targets = [t for o in self.val_outputs for t in o["seg_targets"]]
             iou = self.metric.compute_iou(preds, targets)
+            f1 = self.metric.compute_f1(preds, targets)
             metric_dict.update(
                 {
                     "val_seg_loss": torch.stack(
                         [o["val_seg_loss"] for o in self.val_outputs]
                     ).mean(),
                     "iou": iou,
+                    "f1": f1,
                 }
             )
+
+        if self.cfg.stage.name == "cls_seg":
+            metric_dict["overall"] = (
+                metric_dict["auc"] + metric_dict["iou"] + metric_dict["f1"]
+            ) / 3
 
         self.log_dict(
             metric_dict,
@@ -282,18 +288,7 @@ class LitModel(pl.LightningModule):
         self.val_outputs.clear()
 
     def test_step(self, batch, batch_idx):
-        masks = batch.pop("masks", None)
-        outputs = self(**batch)
+        return self.validation_step(batch, batch_idx)
 
     def on_test_epoch_end(self):
-        preds = torch.cat([o["cls_preds"] for o in self.test_outputs])
-        targets = torch.cat([o["cls_targets"] for o in self.test_outputs])
-        best_threshold_f1, best_f1 = self.metric.find_best_threshold(
-            self.metric.compute_f1, preds, targets
-        )
-        auc = self.metric.compute_auc(preds, targets)
-
-        self.log("f1", best_f1, prog_bar=True, sync_dist=True)
-        self.log("f1_thres", best_threshold_f1, prog_bar=True, sync_dist=True)
-        self.log("auc", auc, prog_bar=True, sync_dist=True)
-        self.test_outputs.clear()
+        return self.on_validation_epoch_end()

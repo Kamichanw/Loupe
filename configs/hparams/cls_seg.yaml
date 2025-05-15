@@ -3,5 +3,4 @@ defaults:
   - seg
   - _self_
 
-cls_loss_weight: 1.0
-seg_loss_weight: 1.0
+batch_size: 32

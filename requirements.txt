@@ -4,3 +4,10 @@ hydra-core
 deepspeed
 scikit-learn
 evaluate
+transformers
+accelerate
+bitsandbytes
+datasets
+ipykernel
+loguru
+timm==1.0.15

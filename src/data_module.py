@@ -43,8 +43,10 @@ class DataModule(pl.LightningDataModule):
                 self.trainset = concatenate_datasets(
                     [self.trainset, additional_trainset]
                 )
-        else:
+        elif stage == "test":
             self.testset = dataset["validation"]
+        elif stage == "predict":
+            self.testset = dataset["test"]
 
     def train_collate_fn(self, batch):
         images = [x["image"] for x in batch]
@@ -82,7 +84,7 @@ class DataModule(pl.LightningDataModule):
         Args:
             batch: List of dictionaries containing "image" and "mask" keys.
             maybe_no_labels: If True, check if all images are None. If so, set mask_labels, masks, and class_labels to None.
-                Only set to True when using test_dataloader.
+                Only set to True when using test_dataloader or predict_dataloader.
         """
         images = [x["image"] for x in batch]
         masks = [x["mask"] for x in batch]
@@ -120,3 +122,6 @@ class DataModule(pl.LightningDataModule):
             collate_fn=partial(self.test_collate_fn, maybe_no_labels=True),
             shuffle=False,
         )
+    
+    def predict_dataloader(self):
+        return self.test_dataloader()

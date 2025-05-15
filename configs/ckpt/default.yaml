@@ -1,3 +1,7 @@
+defaults:
+  - test # load checkpoint paths
+  - _self_
+
 saver:
   _target_: "pytorch_lightning.callbacks.ModelCheckpoint"
   dirpath: null # it will be set during runtime
@@ -6,7 +10,3 @@ saver:
   mode: min
   save_top_k: 1
   save_last: False
-
-# list of checkpoints to load, the latter will override the former
-# must end with .safetensors or .pt/.pth
-checkpoint_paths: []

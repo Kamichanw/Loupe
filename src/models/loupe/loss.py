@@ -133,10 +133,7 @@ class TverskyLoss(nn.Module):
 
 
 class LoupeClsLoss(nn.Module):
-    def __init__(
-        self,
-        config: LoupeConfig,
-    ):
+    def __init__(self, config: LoupeConfig):
         super(LoupeClsLoss, self).__init__()
         self.patch_wise_criterion = Poly1FocalLoss(
             epsilon=1.0,

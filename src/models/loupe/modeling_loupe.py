@@ -12,14 +12,12 @@ from transformers.activations import ACT2FN
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerPixelDecoder,
     Mask2FormerPixelDecoderOutput,
-    Mask2FormerForUniversalSegmentation,
     Mask2FormerMaskedAttentionDecoderOutput,
     Mask2FormerTransformerModule,
     Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention,
     Mask2FormerMaskedAttentionDecoderLayer,
     Mask2FormerPixelDecoderEncoderOnly,
 )
-from transformers.models.mask2former import Mask2FormerConfig
 
 
 from models.loupe.loss import LoupeClsLoss, LoupeSegLoss
@@ -173,9 +171,7 @@ class FuseHead(nn.Module):
         self.fuse = nn.Linear(1 + num_patches, 1, bias=False)
 
     def init_tensors(self):
-        self.fuse.weight.data = nn.init.constant_(
-            self.fuse.weight.data, 1 / self.fuse.in_features
-        )
+        nn.init.constant_(self.fuse.weight.data, 1 / self.fuse.in_features)
 
     def forward(self, x):
         x = self.fuse(x)
@@ -224,7 +220,9 @@ class ScaleBlock(nn.Module):
     def forward(self, x):
         x = self.conv1(x)
         x = self.hidden_act(x)
-        x = self.conv2(x)
+        x = self.conv2(
+            x.contiguous()
+        )  # who knows why I have to add contiguous here ?????
         x = self.norm(x)
 
         return x
@@ -324,9 +322,7 @@ class LoupeClassifier(nn.Module):
                 # output: (batch_size, cls_token + num_patches, output_dim)
                 global_logits = self.classifier(pooled_features[:, 0, :])
             else:
-                raise ValueError(
-                    "pool_type cannot be none when use_cls_token is False"
-                )
+                raise ValueError("pool_type cannot be none when use_cls_token is False")
         # global_logits: (batch_size, 1)
 
         # patch classification

@@ -17,11 +17,10 @@ pixel_poly_epsilon: 1.0
 # mask2former overrides, you can set attr to '-' to use default value
 # visit https://huggingface.co/docs/transformers/main/model_doc/mask2former#transformers.Mask2FormerConfig for available overrides
 mask2former_overrides:
-  num_queries: 10
-  mask_weight: 0
+  num_queries: 20
+  mask_weight: 0 # MUST BE 0 FOR OUR TASK
   class_weight: 2
   dice_weight: 5
-  # use_auxiliary_loss: False
   id2label:
     0: "forgery"
   label2id:
