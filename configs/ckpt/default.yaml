@@ -1,0 +1,12 @@
+# list of checkpoints to load, the latter will override the former
+# must end with .safetensors or .pt/.pth
+checkpoint_paths: []
+
+saver:
+  _target_: "pytorch_lightning.callbacks.ModelCheckpoint"
+  dirpath: null # it will be set during runtime
+  filename: "loupe-{val_loss:.4f}"
+  monitor: val_loss  
+  mode: min
+  save_top_k: 1
+  save_last: False

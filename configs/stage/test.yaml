@@ -1,0 +1,14 @@
+name: test
+
+# if set to a specific path, model predictions will be saved to this path
+# with the filename format: 
+#  - predicted masks: {predict_output_dir}/{ckpt-name}/masks/{image-name}.png
+#  - predicted labels: {predict_output_dir}/{ckpt-name}/predictions.txt
+# in predictions.txt, each line is {image-name}.png,{probs to be forged:.4f} 
+pred_output_dir: null
+
+enable_tta: false
+
+# a float between 0 and 1, if predicted probability is greater than this value, the image will be classified as forged
+# and the corresponding predicted mask will be zeros. it can be set to null to disable this feature
+trust_classifier: 0.5

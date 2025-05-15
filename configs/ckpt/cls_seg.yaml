@@ -1,0 +1,9 @@
+defaults:
+  - default
+  - _self_
+
+checkpoint_paths: ["checkpoints/cls/model.safetensors", "checkpoints/seg/model.safetensors"]
+saver:
+  filename: "cls_seg-{auc:.4f}-{f1:.4f}-{iou:.4f}"
+  monitor: overall  # overall is mean of auc, f1, and iou, based on challenge requirements
+  mode: max
