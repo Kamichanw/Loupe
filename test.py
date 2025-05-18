@@ -19,7 +19,6 @@ while True:
                     "src/infer.py",
                     "stage=test",
                     "stage.pred_output_dir=./pred_outputs",
-                    "stage.trust_classifier=null",
                     f"ckpt.checkpoint_paths=[\"{ckpt_path}\"]",
                 ],
             )

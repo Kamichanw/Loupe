@@ -319,17 +319,5 @@ class LitModel(pl.LightningModule):
                 )
                 for seg in segmentation
             ]
-            if (
-                getattr(self.cfg.stage, "trust_classifier", None)
-                and cls_probs is not None
-            ):
-                threshold = (
-                    self.cfg.stage.trust_classifier
-                )  # whether to trust the classifier
-                for i, mask in enumerate(pred_masks):
-                    # if cls prob < threshold, it means classifier thinks it is real
-                    # so we use a zero mask
-                    if cls_probs[i] < threshold:
-                        pred_masks[i] = Image.new("L", mask.size, 0)
 
         return {"pred_masks": pred_masks, "cls_probs": cls_probs}

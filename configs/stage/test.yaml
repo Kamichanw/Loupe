@@ -8,7 +8,3 @@ name: test
 pred_output_dir: null
 
 enable_tta: false
-
-# a float between 0 and 1, if predicted probability is greater than this value, the image will be classified as forged
-# and the corresponding predicted mask will be zeros. it can be set to null to disable this feature
-trust_classifier: 0.5
