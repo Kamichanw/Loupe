@@ -18,7 +18,7 @@
             "request": "launch",
             "program": "${workspaceFolder}/src/infer.py",
             "console": "integratedTerminal",
-            "args": ["stage=test", "fast_dev_run=True", "out"]
+            "args": ["stage=test", "fast_dev_run=True", "stage.pred_output_dir=./pred_outputs"]
         }
     ]
 }

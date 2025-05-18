@@ -293,12 +293,11 @@ class LoupeHungarianMatcher(Mask2FormerHungarianMatcher):
 
 
 # there are too many bugs in transformers implementation
-# so we have to rewrite the loss some parts
+# so we have to rewrite some parts of loss
 class LoupeSegLoss(Mask2FormerLoss):
     """
     We modified the original Mask2FormerLoss with the following changes:
-    1. Use Poly1FocalLoss instead of CrossEntropyLoss for class labels.
-    2.
+    1. Use Poly1FocalLoss and TverskyLoss instead of sigmoid_cross_entropy_loss and dice_loss for mask supervision.
     """
 
     def __init__(self, config: LoupeConfig):
@@ -318,10 +317,10 @@ class LoupeSegLoss(Mask2FormerLoss):
             epsilon=config.pixel_poly_epsilon,
             alpha=config.pixel_forge_weight,
             gamma=2.0,
+            reduction="none",
         )
         self.pixel_tversky_criterion = TverskyLoss(
-            alpha=config.tversky_alpha,
-            beta=1 - config.tversky_alpha,
+            alpha=config.tversky_alpha, beta=1 - config.tversky_alpha
         )
 
         self.use_auxiliary_loss = config.mask2former_config.use_auxiliary_loss
@@ -362,14 +361,38 @@ class LoupeSegLoss(Mask2FormerLoss):
         target_masks, _ = self._pad_images_to_max_in_batch(mask_labels)
         target_masks = target_masks[tgt_idx]
 
-        target_masks = F.interpolate(target_masks[:, None], size=pred_masks.shape[-2:])
+        # No need to upsample predictions as we are using normalized coordinates
+        pred_masks = pred_masks[:, None]
+        target_masks = target_masks[:, None]
+
+        # Sample point coordinates
+        with torch.no_grad():
+            point_coordinates = self.sample_points_using_uncertainty(
+                pred_masks,
+                lambda logits: self.calculate_uncertainty(logits),
+                self.num_points,
+                self.oversample_ratio,
+                self.importance_sample_ratio,
+            )
+
+            point_labels = sample_point(
+                target_masks, point_coordinates, align_corners=False
+            ).squeeze(1)
+
+        point_logits = sample_point(
+            pred_masks, point_coordinates, align_corners=False
+        ).squeeze(1)
+
         losses = {}
         if self.weight_dict["loss_mask"] > 0:
-            losses["loss_mask"] = self.pixel_mask_criterion(
-                pred_masks.view(num_masks, -1), target_masks.view(num_masks, -1)
+            losses["loss_mask"] = (
+                self.pixel_mask_criterion(point_logits, point_labels).mean(1).sum()
+                / num_masks
             )
         if self.weight_dict["loss_dice"] > 0:
-            losses["loss_dice"] = self.pixel_tversky_criterion(pred_masks, target_masks)
+            losses["loss_dice"] = self.pixel_tversky_criterion(
+                point_logits, point_labels
+            )
 
         del pred_masks
         del target_masks
@@ -437,4 +460,72 @@ class LoupeSegLoss(Mask2FormerLoss):
 
         return losses
 
-    
+    def sample_points_using_uncertainty(
+        self,
+        logits: torch.Tensor,
+        uncertainty_function,
+        num_points: int,
+        oversample_ratio: int,
+        importance_sample_ratio: float,
+    ) -> torch.Tensor:
+        """
+        This function is meant for sampling points in [0, 1] * [0, 1] coordinate space based on their uncertainty. The
+        uncertainty is calculated for each point using the passed `uncertainty function` that takes points logit
+        prediction as input.
+
+        Args:
+            logits (`float`):
+                Logit predictions for P points.
+            uncertainty_function:
+                A function that takes logit predictions for P points and returns their uncertainties.
+            num_points (`int`):
+                The number of points P to sample.
+            oversample_ratio (`int`):
+                Oversampling parameter.
+            importance_sample_ratio (`float`):
+                Ratio of points that are sampled via importance sampling.
+
+        Returns:
+            point_coordinates (`torch.Tensor`):
+                Coordinates for P sampled points.
+        """
+
+        num_boxes = logits.shape[0]
+        num_points_sampled = int(num_points * oversample_ratio)
+
+        # Get random point coordinates
+        point_coordinates = torch.rand(
+            num_boxes, num_points_sampled, 2, device=logits.device, dtype=logits.dtype
+        )
+        # Get sampled prediction value for the point coordinates
+        point_logits = sample_point(logits, point_coordinates, align_corners=False)
+        # Calculate the uncertainties based on the sampled prediction values of the points
+        point_uncertainties = uncertainty_function(point_logits)
+
+        num_uncertain_points = int(importance_sample_ratio * num_points)
+        num_random_points = num_points - num_uncertain_points
+
+        idx = torch.topk(point_uncertainties[:, 0, :], k=num_uncertain_points, dim=1)[1]
+        shift = num_points_sampled * torch.arange(
+            num_boxes, dtype=torch.long, device=logits.device
+        )
+        idx += shift[:, None]
+        point_coordinates = point_coordinates.view(-1, 2)[idx.view(-1), :].view(
+            num_boxes, num_uncertain_points, 2
+        )
+
+        if num_random_points > 0:
+            point_coordinates = torch.cat(
+                [
+                    point_coordinates,
+                    torch.rand(
+                        num_boxes,
+                        num_random_points,
+                        2,
+                        device=logits.device,
+                        dtype=logits.dtype,
+                    ),
+                ],
+                dim=1,
+            )
+        return point_coordinates

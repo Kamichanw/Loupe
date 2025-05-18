@@ -162,12 +162,10 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
         PyTorch.
 
         Args:
-            class_queries_logits (`torch.Tensor`, shape `(batch_size, num_queries, num_classes+1)`):
-                The class queries logits of the model. The last class is the null class.
-            masks_queries_logits (`torch.Tensor`, shape `(batch_size, num_queries, height, width)`):
-                The mask queries logits of the model.
+            outputs (`LoupeUniversalOutput`):
+                LoupeUniversalOutput: The output of the model.
             target_sizes (`List[Tuple[int, int]]`, *optional*):
-                List of length (batch_size), where each list item (`Tuple[int, int]]`) corresponds to the requested
+                List of length (batch_size), where each list item (`Tuple[int, int]`) corresponds to the requested
                 final size (height, width) of each prediction. If left to None, predictions will not be resized.
         Returns:
             `List[torch.Tensor]`:
@@ -183,12 +181,13 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
             masks_queries_logits, size=(384, 384), mode="bilinear", align_corners=False
         )
 
-        masks_classes = class_queries_logits.softmax(dim=-1)
+        # Remove the null class `[..., :-1]`
+        masks_classes = class_queries_logits.softmax(dim=-1)[..., :-1]
         masks_probs = (
             masks_queries_logits.sigmoid()
         )  # [batch_size, num_queries, height, width]
 
-        # Semantic segmentation logits of shape (batch_size, num_classes + 1 (background class), height, width)
+        # Semantic segmentation logits of shape (batch_size, num_classes, height, width)
         segmentation = torch.einsum("bqc, bqhw -> bchw", masks_classes, masks_probs)
         batch_size = class_queries_logits.shape[0]
 
@@ -201,19 +200,20 @@ class LoupeImageProcessor(Mask2FormerImageProcessor):
 
             semantic_segmentation = []
             for idx in range(batch_size):
+                # resized_logits: (1, num_classes, height, width)
                 resized_logits = F.interpolate(
                     segmentation[idx].unsqueeze(dim=0),
                     size=target_sizes[idx],
                     mode="bilinear",
                     align_corners=False,
                 )
-                semantic_map = resized_logits[0].argmax(dim=0)
+                semantic_map = torch.where(resized_logits[0][0] > 0.5, 0, 1)
                 semantic_segmentation.append(semantic_map.to(dtype=torch.uint8))
         else:
-            semantic_segmentation = segmentation.argmax(dim=1)
+            semantic_segmentation = torch.where(segmentation > 0.5, 0, 1)
             # convert tensor to batch list
             semantic_segmentation = [
-                semantic_segmentation[i].to(dtype=torch.uint8)
+                semantic_segmentation[i][0].to(dtype=torch.uint8)
                 for i in range(semantic_segmentation.shape[0])
             ]
 

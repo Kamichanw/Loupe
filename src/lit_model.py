@@ -43,6 +43,11 @@ class LitModel(pl.LightningModule):
                 state_dict = load_file(ckpt_path)
             elif ckpt_path.endswith(".pt") or ckpt_path.endswith(".pth"):
                 state_dict = torch.load(ckpt_path)
+            else:
+                raise ValueError(
+                    f"Unsupported checkpoint format: {ckpt_path}. "
+                    "Please use .safetensors, .pt or .pth format."
+                )
             logger.info(f"Loading checkpoint from {ckpt_path}")
             self.load_state_dict(
                 state_dict=state_dict,

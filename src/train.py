@@ -46,7 +46,7 @@ def convert_deepspeed_checkpoint(cfg: DictConfig):
     ckpt = torch.load(
         os.path.join(converted_save_dir, "fp32_state_dict.pth"),
         map_location="cpu",
-        weights_only=False,
+        weights_only=True,
     )
     for param in list(ckpt["state_dict"].keys()):
         if getattr(cfg.model, "freeze_backbone", False) and param.startswith(

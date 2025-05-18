@@ -1,18 +1,43 @@
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 import hydra
 import torch
 import pytorch_lightning as pl
 
 from pytorch_lightning.callbacks import RichProgressBar, BasePredictionWriter
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from omegaconf import DictConfig
 from pathlib import Path
-from PIL import Image
 
 from models.loupe import LoupeModel, LoupeConfig
 from data_module import DataModule
 from lit_model import LitModel
+
+
+@rank_zero_only
+def prepare_output_dir(pred_path, mask_dir):
+    if os.path.isfile(pred_path):
+        os.remove(pred_path)
+    if os.path.isdir(mask_dir):
+        print(f"Removing existing directory: {mask_dir}...")
+        try:
+            with tempfile.TemporaryDirectory() as empty_dir:
+                result = subprocess.run(
+                    ["rsync", "-a", "--delete", empty_dir + "/", mask_dir + "/"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"rsync failed: {result.stderr}")
+        except (FileNotFoundError, RuntimeError) as e:
+            print(
+                f"rsync not available or failed ({e}), overwriting previous results..."
+            )
+    os.makedirs(mask_dir, exist_ok=True)
 
 
 class CustomWriter(BasePredictionWriter):
@@ -22,12 +47,7 @@ class CustomWriter(BasePredictionWriter):
         self.mask_dir = os.path.join(output_dir, "masks")
         self.pred_path = os.path.join(output_dir, "predictions.txt")
 
-        if os.path.isfile(self.pred_path):
-            os.remove(self.pred_path)
-        if os.path.isdir(self.mask_dir):
-            shutil.rmtree(self.mask_dir)
-
-        os.makedirs(self.mask_dir)
+        prepare_output_dir(self.pred_path, self.mask_dir)
 
     def write_on_batch_end(
         self,
@@ -42,7 +62,7 @@ class CustomWriter(BasePredictionWriter):
         cls_probs, pred_masks = prediction["cls_probs"], prediction["pred_masks"]
         with open(self.pred_path, "a") as f:
             for name, cls_prob in zip(batch["name"], cls_probs):
-                f.write(f"{name},{cls_prob.item():.4f}\n")
+                f.write(f"{name},{cls_prob:.4f}\n")
 
         for name, pred_mask in zip(batch["name"], pred_masks):
             pred_mask.save(os.path.join(self.mask_dir, name))

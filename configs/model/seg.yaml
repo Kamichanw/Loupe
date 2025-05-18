@@ -7,9 +7,9 @@ freeze_backbone: True
 freeze_seg: False
 # tversky alpha and beta control the weight of false positive and false negative, respectively
 # the tversky beta is set to 1 - alpha
-tversky_alpha: 0.7
+tversky_alpha: 0.3
 # weight for forged pixels, set between 0 and 1
-pixel_forge_weight: 0.9
+pixel_forge_weight: 0.8
 # epsilon for poly1 focal loss
 pixel_poly_epsilon: 1.0
 # backbone_path: /gemini/code/loupe/checkpoints/cls/model.safetensors # if can also be a path to a cls checkpoint
@@ -18,7 +18,7 @@ pixel_poly_epsilon: 1.0
 # visit https://huggingface.co/docs/transformers/main/model_doc/mask2former#transformers.Mask2FormerConfig for available overrides
 mask2former_overrides:
   num_queries: 20
-  mask_weight: 0 # MUST BE 0 FOR OUR TASK
+  mask_weight: 5
   class_weight: 2
   dice_weight: 5
   id2label:

@@ -22,7 +22,6 @@ class DataModule(pl.LightningDataModule):
     def setup(self, stage: str) -> None:
         dataset = load_dataset("parquet", data_dir=self.cfg.data_dir)
         if stage in [None, "validate", "fit"]:
-            self.trainset = dataset["train"]
             validset = dataset["validation"]
             if isinstance(self.cfg.valid_size, int):
                 assert 0 < self.cfg.valid_size < len(validset)
@@ -35,15 +34,17 @@ class DataModule(pl.LightningDataModule):
                     f"Invalid valid_size: {self.cfg.valid_size}. It should be either int or float."
                 )
 
+            # use a small subset to prevent too long validation time
             additional_trainset, validset = validset.train_test_split(
                 test_size=valid_size, seed=self.cfg.seed, shuffle=True
             ).values()
-            # use a small subset to prevent too long validation time
             self.validset = validset
-            if self.cfg.merge_valid:
-                self.trainset = concatenate_datasets(
-                    [self.trainset, additional_trainset]
-                )
+
+            # for the 3th stage training, we only use the additional trainset splitted from the validation set
+            if self.cfg.stage.name == "cls_seg":
+                self.trainset = additional_trainset
+            else:
+                self.trainset = dataset["train"]
         elif stage == "test":
             self.testset = dataset["validation"]
         elif stage == "predict":
