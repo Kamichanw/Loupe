@@ -5,7 +5,7 @@ initializer_range: 0.02
 
 # backbone configs
 backbone_name: PE-Core-L14-336
-backbone_path: /gemini/code/loupe/pretrained_weights/pe/PE-Core-L14-336.pt
+backbone_path: ./pretrained_weights/pe/PE-Core-L14-336.pt
 freeze_backbone: False
 
 # backbone overrides, you can set attr to '-' to use default value

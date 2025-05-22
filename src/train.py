@@ -36,7 +36,9 @@ def convert_deepspeed_checkpoint(cfg: DictConfig):
     All frozen parameters will be removed.
     """
     converted_save_dir = os.path.join(
-        project_root, "checkpoints", os.path.basename(checkpoint_callback.best_model_path)
+        project_root,
+        "checkpoints",
+        os.path.basename(checkpoint_callback.best_model_path),
     )
     os.makedirs(converted_save_dir, exist_ok=True)
     convert_zero_checkpoint_to_fp32_state_dict(
@@ -75,6 +77,12 @@ def convert_deepspeed_checkpoint(cfg: DictConfig):
 )
 def main(cfg: DictConfig):
     pl.seed_everything(cfg.seed)
+
+    if cfg.stage.name == "test":
+        raise ValueError(
+            "This script is for training only. Please use one of cls, seg, or cls_seg stages."
+        )
+
     global checkpoint_callback
     checkpoint_callback = hydra.utils.instantiate(
         cfg.ckpt.saver,
