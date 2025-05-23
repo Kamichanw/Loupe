@@ -2,27 +2,30 @@ from dataclasses import asdict, dataclass
 import math
 import os
 from loguru import logger
-import timm
 import torch
 import torch.nn as nn
 
-from typing import Dict, List, Optional, Union, cast
+from typing import Dict, List, Optional, cast
 from transformers.modeling_utils import PreTrainedModel, ModelOutput
-from transformers.activations import ACT2FN
 from transformers.models.mask2former.modeling_mask2former import (
-    Mask2FormerPixelDecoder,
     Mask2FormerPixelDecoderOutput,
     Mask2FormerMaskedAttentionDecoderOutput,
     Mask2FormerTransformerModule,
     Mask2FormerPixelDecoderEncoderMultiscaleDeformableAttention,
     Mask2FormerMaskedAttentionDecoderLayer,
-    Mask2FormerPixelDecoderEncoderOnly,
 )
 
 
 from models.loupe.loss import LoupeClsLoss, LoupeSegLoss
 from models.loupe.configuration_loupe import LoupeConfig
 from models.pe import VisionTransformer
+from models.loupe.modules import (
+    LoupeFeaturePyramid,
+    LoupeClsHead,
+    FuseHead,
+    LoupePixelDecoder,
+    LoupePixelDecoderConditionedEncoder,
+)
 
 
 @dataclass
@@ -110,165 +113,6 @@ class LoupeUniversalOutput(ModelOutput):
     cls_logits: Optional[torch.FloatTensor] = None
     class_queries_logits: Optional[torch.FloatTensor] = None
     masks_queries_logits: Optional[torch.FloatTensor] = None
-
-
-class LoupeClsHead(nn.Module):
-
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: Optional[int] = None,
-        num_layers: int = 2,
-        hidden_act: Union[str, type] = "gelu",
-    ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_dim
-        self.num_layers = num_layers
-
-        if num_layers >= 2 and hidden_dim is None:
-            raise ValueError(
-                "If num_layers >= 2, hidden_dim must be specified. "
-                "Otherwise, the model will not be able to learn."
-            )
-
-        if isinstance(hidden_act, str):
-            self.hidden_act = ACT2FN[hidden_act]
-        else:
-            self.hidden_act = hidden_act
-
-        self.layers = nn.ModuleList(
-            [
-                nn.Linear(
-                    input_dim if i == 0 else self.hidden_size,
-                    self.hidden_size,
-                )
-                for i in range(self.num_layers - 1)
-            ]
-        )
-        self.layers.append(
-            nn.Linear(
-                (input_dim if self.num_layers == 1 else self.hidden_size),
-                1,  # logits for predicting if it is forgery
-            )
-        )
-
-    def init_tensors(self):
-        for layer in self.layers:
-            layer.reset_parameters()
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-            if layer != self.layers[-1]:
-                x = self.hidden_act(x)
-        return x
-
-
-class FuseHead(nn.Module):
-    def __init__(self, config: LoupeConfig) -> None:
-        super().__init__()
-        num_patches = (config.image_size // config.patch_size) ** 2
-        self.fuse = nn.Linear(1 + num_patches, 1, bias=False)
-
-    def init_tensors(self):
-        nn.init.constant_(self.fuse.weight.data, 1 / self.fuse.in_features)
-
-    def forward(self, x):
-        x = self.fuse(x)
-        return x
-
-
-class ScaleBlock(nn.Module):
-    """
-    Upscale or downscale the input feature map 2x times using nn.ConvTranspose2d or nn.Conv2d.
-    """
-
-    def __init__(
-        self,
-        n_channels,
-        conv1_layer=nn.ConvTranspose2d,
-        hidden_act: Union[str, type] = "gelu",
-    ) -> None:
-        super().__init__()
-        if conv1_layer == nn.ConvTranspose2d:
-            channel_args = (
-                n_channels,
-                n_channels,
-            )
-        else:
-            channel_args = ()
-        self.conv1 = conv1_layer(
-            *channel_args,
-            kernel_size=2,
-            stride=2,
-        )
-
-        if isinstance(hidden_act, str):
-            self.hidden_act = ACT2FN[hidden_act]
-        else:
-            self.hidden_act = hidden_act
-        self.conv2 = nn.Conv2d(
-            n_channels,
-            n_channels,
-            kernel_size=3,
-            padding=1,
-            groups=n_channels,
-            bias=False,
-        )
-        self.norm = timm.layers.LayerNorm2d(n_channels)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.hidden_act(x)
-        x = self.conv2(
-            x.contiguous()
-        )  # who knows why I have to add contiguous here ?????
-        x = self.norm(x)
-
-        return x
-
-
-class LoupeFeaturePyramid(nn.Module):
-
-    def __init__(self, n_channels: int, scales: list[float | int] = None):
-        """
-        Initializes the LoupeFeaturePyramid with the given scales.
-
-        Args:
-            n_channels (int): The number of channels in the input feature map.
-            scales (list[float or int]): A list whose length=4 representing the scales for the pyramid.
-                Should be integer powers of 2 in ascending order. Defaults to [1/2, 1, 2, 4].
-        """
-        super().__init__()
-        self.hidden_dim = n_channels
-        self.scales = scales or [1 / 2, 1, 2, 4]
-        is_power_of_2 = lambda n: n > 0 and math.isclose(
-            math.log2(n), round(math.log2(n))
-        )
-        if any(not is_power_of_2(scale) for scale in self.scales):
-            raise ValueError(
-                f"All scales must be integer powers of 2, but got {self.scales}"
-            )
-
-        self.scale_layers = nn.ModuleList(
-            [
-                nn.Sequential(*self._make_layer(scale))
-                for scale in sorted(self.scales, reverse=True)
-            ]
-        )
-
-    def _make_layer(self, scale: float | int) -> list[nn.Module]:
-        if scale == 1:
-            return [nn.Identity()]
-        conv1_layer = nn.ConvTranspose2d if scale > 1 else nn.MaxPool2d
-        num_steps = abs(int(round(math.log2(scale))))
-        return [
-            ScaleBlock(self.hidden_dim, conv1_layer=conv1_layer)
-            for _ in range(num_steps)
-        ]
-
-    def forward(self, x):
-        return [layer(x) for layer in self.scale_layers]
 
 
 class LoupeClassifier(nn.Module):
@@ -366,9 +210,18 @@ class LoupeSegmentor(nn.Module):
         self.config = config
         self.fpn = LoupeFeaturePyramid(config.backbone_config.width)
         mask2former_config = config.mask2former_config
-        self.pixel_decoder = Mask2FormerPixelDecoder(
-            mask2former_config, config.feature_channels
+        # 0 for real, 1 for forgery. these two embeddings are used as an extra condition
+        # for the encoders of pixel decoder.
+        self.label_embedding = nn.ParameterList(
+            [
+                nn.Parameter(
+                    torch.randn(mask2former_config.feature_size)
+                    * config.initializer_range
+                )
+                for _ in range(2)
+            ]
         )
+        self.pixel_decoder = LoupePixelDecoder(config)
         self.mask2former_decoder = Mask2FormerTransformerModule(
             in_features=mask2former_config.feature_size, config=mask2former_config
         )
@@ -437,13 +290,36 @@ class LoupeSegmentor(nn.Module):
         self,
         features: torch.Tensor,
         pixel_mask: Optional[torch.Tensor] = None,
-        mask_labels: Optional[torch.Tensor] = None,
-        class_labels: Optional[torch.Tensor] = None,
+        pseudo_labels: Optional[torch.Tensor] = None,
+        mask_labels: Optional[List[torch.Tensor]] = None,
+        class_labels: Optional[List[torch.Tensor]] = None,
     ):
+        """
+        Forward pass for the segmentation head. The output from the backbone is passed
+        through the fpn to get the multi-scale features. Then, mix label embeddings based on
+        pseudo labels and pass the multi-scale features through the pixel decoder.
+        The output from the pixel decoder is then used as same as the mask2former.
+        """
         # scale features to the different scales
         backbone_features = self.fpn(features)
+        if pseudo_labels is None and class_labels is not None:
+            # pseudo_labels: (batch_size,)
+            pseudo_labels = torch.tensor(
+                [t.size(0) for t in class_labels], device=features.device
+            )
+
+        if pseudo_labels is not None:
+            pseudo_labels = pseudo_labels.unsqueeze(-1)
+            pseudo_queries = (
+                self.label_embedding[1] * pseudo_labels
+                + self.label_embedding[0] * (1 - pseudo_labels)
+            ).unsqueeze(1)
+        else:
+            pseudo_queries = None
+        # pseudo_queries: (batch_size, 1, feature_size)
+
         pixel_decoder_output: Mask2FormerPixelDecoderOutput = self.pixel_decoder(
-            backbone_features, output_hidden_states=False
+            backbone_features, pseudo_queries=pseudo_queries, output_hidden_states=False
         )
 
         transformer_module_output: Mask2FormerMaskedAttentionDecoderOutput = (
@@ -549,13 +425,13 @@ class LoupePreTrainedModel(PreTrainedModel):
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p, gain=xavier_std)
 
-        elif isinstance(module, Mask2FormerPixelDecoder):
+        elif isinstance(module, LoupePixelDecoder):
             for p in module.parameters():
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p)
             nn.init.normal_(module.level_embed, std=0)
 
-        elif isinstance(module, Mask2FormerPixelDecoderEncoderOnly):
+        elif isinstance(module, LoupePixelDecoderConditionedEncoder):
             for p in module.parameters():
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p)
@@ -650,22 +526,28 @@ class LoupeModel(LoupePreTrainedModel):
     def seg_forward(
         self,
         features: List[torch.Tensor],
-        mask_labels: Optional[torch.Tensor] = None,
-        pixel_mask: Optional[torch.Tensor] = None,
-        class_labels: Optional[torch.Tensor] = None,
+        pseudo_labels: Optional[torch.Tensor] = None,
+        mask_labels: Optional[List[torch.Tensor]] = None,
+        pixel_mask: Optional[List[torch.Tensor]] = None,
+        class_labels: Optional[List[torch.Tensor]] = None,
     ) -> LoupeSegmentationOutput:
         r"""
         features (`torch.Tensor` of shape `(batch_size, num_patches, hidden_dim)`, *optional*):
             Features of the input image extracted by backbone.
-        mask_labels (`torch.Tensor` of shape `(batch_size, height, width)`, *optional*):
+        pseudo_labels (`torch.Tensor` of shape `(batch_size,)`, *optional*):
+            Pseudo labels generated from classification head. Each element should be in range of [0, 1], indicating the
+            the activation, i.e., the logits after sigmoid. This is an extra information provided to mask2former, which can
+            be used to test time augmentation.
+        mask_labels (a list of `torch.FloatTensor` of shape `(num_labels, height, width)`, *optional*):
             Segmentation masks for each image in the batch. Each mask should be in range of [0, 1], indicating the
             forgery ratio of a pixel.
-        class_labels (`torch.Tensor` of shape `(batch_size, 0 or 1)`, *optional*):
+        class_labels (a list of `torch.FloatTensor` of shape `(0 or 1)`, *optional*):
             Labels for indicating whether a forged area is in the image.
         """
         return self.segmentor(
             features=features,
             pixel_mask=pixel_mask,
+            pseudo_labels=pseudo_labels,
             mask_labels=mask_labels,
             class_labels=class_labels,
         )
@@ -673,24 +555,24 @@ class LoupeModel(LoupePreTrainedModel):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        mask_labels: Optional[torch.Tensor] = None,
-        pixel_mask: Optional[torch.Tensor] = None,
-        class_labels: Optional[torch.Tensor] = None,
+        mask_labels: Optional[List[torch.Tensor]] = None,
+        pixel_mask: Optional[List[torch.Tensor]] = None,
+        class_labels: Optional[List[torch.Tensor]] = None,
         patch_labels: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
     ) -> LoupeUniversalOutput:
         r"""
         pixel_values (`torch.FloatTensor` of shape `(batch_size, 3, height, width)`):
             Pixel values of the input image. Should be of the same size as the input image.
-        mask_labels (`torch.FloatTensor` of shape `(batch_size, height, width)`, *optional*):
+        mask_labels (a list of `torch.FloatTensor` of shape `(batch_size, num_labels, height, width)`, *optional*):
             Segmentation masks for each image in the batch. Each mask should be in range of [0, 1], indicating the
             forgery ratio of a pixel.
-        pixel_mask (`torch.LongTensor` of shape `(batch_size, height, width)`, *optional*):
+        pixel_mask (a list of `torch.LongTensor` of shape `(batch_size, height, width)`, *optional*):
             Mask to avoid performing attention on padding pixel values. Mask values selected in `[0, 1]`:
 
             - 1 for pixels that are real (i.e. **not masked**),
             - 0 for pixels that are padding (i.e. **masked**).
-        class_labels (`torch.Tensor` of shape `(batch_size, 0 or 1)`, *optional*):
+        class_labels (a list of `torch.FloatTensor` of shape `(0 or 1)`, *optional*):
             Labels for indicating whether a forged area is in the image.
         patch_labels (`torch.FloatTensor` of shape `(batch_size, num_patches)`, *optional*):
             Labels for computing the patch-wise classification loss. Each element should be in range of [0, 1], indicating
@@ -728,7 +610,7 @@ class LoupeModel(LoupePreTrainedModel):
         # features: (batch_size, cls_token + num_patches, hidden_dim)
         features = self.backbone.forward_features(pixel_values, norm=True)
         pooled_features = self.backbone._pool(features)
-        if self.config.stage == "cls":
+        if "cls" in self.config.stage or "test" in self.config.stage:
             cls_output = self.cls_forward(
                 features=features,
                 pooled_features=pooled_features,
@@ -738,31 +620,20 @@ class LoupeModel(LoupePreTrainedModel):
             cls_loss = cls_output.loss
             cls_logits = cls_output.logits
             loss_dict["cls"] = {"loss": cls_loss}
-        elif self.config.stage == "seg":
+        if "seg" in self.config.stage or "test" in self.config.stage:
+            if self.config.enable_pseudo_labels:
+                assert cls_output is not None
+                pseudo_labels = cls_output.logits.sigmoid()
+            else:
+                pseudo_labels = None
+
             seg_output = self.seg_forward(
                 features=reshape_features(features),
+                pseudo_labels=pseudo_labels,
                 pixel_mask=pixel_mask,
                 mask_labels=mask_labels,
                 class_labels=class_labels,
             )
-            seg_loss = seg_output.loss
-            masks_queries_logits = seg_output.masks_queries_logits
-            class_queries_logits = seg_output.class_queries_logits
-        else:
-            cls_output = self.cls_forward(
-                features=features,
-                pooled_features=pooled_features,
-                labels=labels,
-                patch_labels=patch_labels,
-            )
-            seg_output = self.seg_forward(
-                features=reshape_features(features),
-                mask_labels=mask_labels,
-                pixel_mask=pixel_mask,
-                class_labels=class_labels,
-            )
-            cls_loss = cls_output.loss
-            cls_logits = cls_output.logits
             seg_loss = seg_output.loss
             masks_queries_logits = seg_output.masks_queries_logits
             class_queries_logits = seg_output.class_queries_logits

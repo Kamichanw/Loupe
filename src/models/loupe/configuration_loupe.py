@@ -45,6 +45,7 @@ class LoupeConfig(PretrainedConfig):
         queries_forge_weight: float = 0.9,
         pixel_forge_weight: float = 0.9,
         pixel_poly_epsilon: float = 1.0,
+        enable_pseudo_labels: bool = False,
         seg_loss_weight=1.0,
         mask2former_overrides: Optional[dict] = None,
         **kwargs,
@@ -105,7 +106,14 @@ class LoupeConfig(PretrainedConfig):
         self.queries_forge_weight = queries_forge_weight
         self.pixel_forge_weight = pixel_forge_weight
         self.pixel_poly_epsilon = pixel_poly_epsilon
+        self.enable_pseudo_labels = enable_pseudo_labels
         self.seg_loss_weight = seg_loss_weight
+
+        if enable_pseudo_labels and "cls_seg" not in stage and "test" not in stage:
+            raise ValueError(
+                "enable_pseudo_labels can only be True when classification and segmentation are both enabled."
+                "Please set stage to 'cls_seg' or 'test'."
+            )
 
         # remaining configs
         self.hidden_size = self.backbone_config.width

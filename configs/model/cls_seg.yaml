@@ -6,3 +6,12 @@ defaults:
 freeze_backbone: False
 freeze_cls: False
 freeze_seg: False
+
+cls_loss_weight: 2.0
+seg_loss_weight: 1.0
+
+# pseudo labels is typically used for test-time adaptation
+# when enable_pseudo_labels is True, the model will use the prediction of the
+# classifier to generate pseudo labels for the segmentation head as additional
+# conditioning
+enable_pseudo_labels: False

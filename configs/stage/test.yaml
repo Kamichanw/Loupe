@@ -6,5 +6,3 @@ name: test
 #  - predicted labels: {predict_output_dir}/{ckpt-name}/predictions.txt
 # in predictions.txt, each line is {image-name}.png,{probs to be forged:.4f} 
 pred_output_dir: null
-
-enable_tta: false
