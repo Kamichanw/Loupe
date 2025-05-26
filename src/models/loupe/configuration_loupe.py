@@ -42,10 +42,9 @@ class LoupeConfig(PretrainedConfig):
         fpn_scales: list[int | float] = [0.5, 2, 4],
         freeze_seg=False,
         tversky_alpha: float = 0.7,
-        queries_forge_weight: float = 0.9,
         pixel_forge_weight: float = 0.9,
         pixel_poly_epsilon: float = 1.0,
-        enable_pseudo_labels: bool = False,
+        enable_conditional_queries: bool = False,
         seg_loss_weight=1.0,
         mask2former_overrides: Optional[dict] = None,
         **kwargs,
@@ -103,15 +102,14 @@ class LoupeConfig(PretrainedConfig):
             )
         self.freeze_seg = freeze_seg
         self.tversky_alpha = tversky_alpha
-        self.queries_forge_weight = queries_forge_weight
         self.pixel_forge_weight = pixel_forge_weight
         self.pixel_poly_epsilon = pixel_poly_epsilon
-        self.enable_pseudo_labels = enable_pseudo_labels
+        self.enable_conditional_queries = enable_conditional_queries
         self.seg_loss_weight = seg_loss_weight
 
-        if enable_pseudo_labels and "cls_seg" not in stage and "test" not in stage:
+        if enable_conditional_queries and "cls_seg" not in stage and "test" not in stage:
             raise ValueError(
-                "enable_pseudo_labels can only be True when classification and segmentation are both enabled."
+                "enable_conditional_queries can only be True when classification and segmentation are both enabled."
                 "Please set stage to 'cls_seg' or 'test'."
             )
 

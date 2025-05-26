@@ -1,5 +1,4 @@
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -9,12 +8,17 @@ import pytorch_lightning as pl
 
 from pytorch_lightning.callbacks import RichProgressBar, BasePredictionWriter
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
+from pytorch_lightning.loggers import TensorBoardLogger
 from omegaconf import DictConfig
 from pathlib import Path
 
 from models.loupe import LoupeModel, LoupeConfig
 from data_module import DataModule
 from lit_model import LitModel
+
+sys.path.insert(0, ".")
+project_root = Path(__file__).resolve().parent.parent
+save_path = os.environ.get("CATTINO_TASK_HOME", f"{project_root}/results")
 
 
 @rank_zero_only
@@ -83,23 +87,51 @@ def main(cfg: DictConfig):
     if cfg.stage.name != "test":
         raise ValueError("This script is for testing only. Please use the test stage.")
 
+    if cfg.stage.enable_tta:
+        # if tta is enbaled, turn trainer to trainable
+        trainer_overrides = dict(
+            logger=TensorBoardLogger(
+                save_dir=save_path,
+                name="logs",
+                sub_dir=cfg.stage.name,
+                default_hp_metric=False,
+            ),
+            max_epochs=1,
+            strategy=cfg.strategy,
+            gradient_clip_val=cfg.hparams.grad_clip_val,
+            val_check_interval=0.2,
+            log_every_n_steps=2,
+            accumulate_grad_batches=cfg.hparams.accumulate_grad_batches,
+        )
+        cfg.model.freeze_seg = False
+        cfg.model.enable_conditional_queries = True
+    else:
+        trainer_overrides = dict(logger=False)
+
     callbacks = [RichProgressBar()]
     if cfg.stage.pred_output_dir:
         callbacks.append(CustomWriter(cfg=cfg, write_interval="batch"))
+
     trainer = pl.Trainer(
-        logger=False,
         callbacks=callbacks,
-        precision=cfg.precision,
         fast_dev_run=cfg.fast_dev_run,
+        devices=1 if cfg.fast_dev_run else "auto",
+        precision=cfg.precision,
         enable_checkpointing=False,
+        **trainer_overrides,
     )
     torch.set_float32_matmul_precision("medium")
     loupe_config = LoupeConfig(stage=cfg.stage.name, **cfg.model)
     loupe = LoupeModel(loupe_config)
     model = LitModel(cfg=cfg, loupe=loupe)
-    model.eval()
     data_module = DataModule(cfg, loupe_config)
-    if cfg.stage.pred_output_dir:
+
+    if cfg.stage.enable_tta:
+        trainer.fit(
+            model,
+            data_module,
+        )
+    elif cfg.stage.pred_output_dir:
         trainer.predict(
             model,
             data_module,

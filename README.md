@@ -20,7 +20,11 @@ mkdir ./pretrained_weights/PE-Core-L14-336
 ```
 
 ### 2. Prepare pretrained weights
-Download [Perception Encoder](https://github.com/facebookresearch/perception_models) following their original instructions, and place `PE-Core-L14-336.pt` at `./pretrained_weights/PE-Core-L14-336`.
+Download [Perception Encoder](https://github.com/facebookresearch/perception_models) following their original instructions, and place `PE-Core-L14-336.pt` at `./pretrained_weights/PE-Core-L14-336`. This can be done with `huggingface-cli`:
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+huggingface-cli download facebook/PE-Core-L14-336 PE-Core-L14-336.pt --local-dir ./pretrained_weights/PE-Core-L14-336
+```
 
 ### 3. Prepare datasets
 Download the dataset to any location of your choice. Then, use the [`dataset_preprocess.ipynb`](./dataset_preprocess.ipynb) notebook to preprocess the dataset. This process converts the dataset into a directly loadable `DatasetDict` and saves it in `parquet` format.

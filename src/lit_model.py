@@ -15,8 +15,6 @@ from models.loupe import LoupeModel
 from models.loupe.image_precessing_loupe import LoupeImageProcessor
 from models.loupe.modeling_loupe import LoupeUniversalOutput
 
-torch.serialization.add_safe_globals([set])
-
 
 class LitModel(pl.LightningModule):
     def __init__(self, cfg: DictConfig, loupe: LoupeModel) -> None:
@@ -148,7 +146,7 @@ class LitModel(pl.LightningModule):
         param_dict = {n: p for n, p in self.loupe.named_parameters() if p.requires_grad}
         optim_groups = []
 
-        if self.cfg.hparams.backbone_lr:
+        if getattr(self.cfg.hparams, "backbone_lr", None):
             param_dict = set_hparam(
                 param_dict, "backbone", lr=self.cfg.hparams.backbone_lr
             )

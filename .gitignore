@@ -137,6 +137,7 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
+debug.ipynb
 pretrained_weights/
 outputs/
 results/

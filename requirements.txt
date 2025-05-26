@@ -1,9 +1,9 @@
 lightning
 lightning[extra]
+torch==2.5.1
 hydra-core
 deepspeed
 scikit-learn
 evaluate
 timm
 transformers
-torch

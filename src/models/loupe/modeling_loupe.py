@@ -20,11 +20,11 @@ from models.loupe.loss import LoupeClsLoss, LoupeSegLoss
 from models.loupe.configuration_loupe import LoupeConfig
 from models.pe import VisionTransformer
 from models.loupe.modules import (
-    LoupeFeaturePyramid,
+    FeaturePyramid,
     LoupeClsHead,
     FuseHead,
-    LoupePixelDecoder,
-    LoupePixelDecoderConditionedEncoder,
+    PixelDecoder,
+    PixelDecoderConditionalEncoder,
 )
 
 
@@ -38,12 +38,15 @@ class LoupeClassificationOutput(ModelOutput):
             The sum of the whole image classification loss and patch classiication (if labels are provided).
         logits (`torch.FloatTensor` of shape `(batch_size, 1)`, *optional*):
             Classification logits of the model, may be fused with patch logits.
+        patch_logits (`torch.FloatTensor` of shape `(batch_size, num_patch ** 2)`, *optional*):
+            Patch classification logits of the model.
         last_hidden_states (`torch.FloatTensor` of shape `(batch_size, num_patches, hidden_dim)`, *optional*):
             Last hidden states of the model (if `output_hidden_states=True`).
     """
 
     loss: Optional[torch.FloatTensor] = None
     logits: Optional[torch.FloatTensor] = None
+    patch_logits: Optional[torch.FloatTensor] = None
     last_hidden_states: Optional[torch.FloatTensor] = None
 
 
@@ -200,6 +203,7 @@ class LoupeClassifier(nn.Module):
         return LoupeClassificationOutput(
             loss=loss,
             logits=logits,
+            patch_logits=patch_logits,
             last_hidden_states=features,
         )
 
@@ -208,20 +212,23 @@ class LoupeSegmentor(nn.Module):
     def __init__(self, config: LoupeConfig):
         super().__init__()
         self.config = config
-        self.fpn = LoupeFeaturePyramid(config.backbone_config.width)
+        self.fpn = FeaturePyramid(config.backbone_config.width)
         mask2former_config = config.mask2former_config
-        # 0 for real, 1 for forgery. these two embeddings are used as an extra condition
-        # for the encoders of pixel decoder.
-        self.label_embedding = nn.ParameterList(
-            [
-                nn.Parameter(
-                    torch.randn(mask2former_config.feature_size)
-                    * config.initializer_range
-                )
-                for _ in range(2)
-            ]
-        )
-        self.pixel_decoder = LoupePixelDecoder(config)
+
+        if config.enable_conditional_queries:
+            # 0 for real, 1 for forgery. these two embeddings are used as an extra condition
+            # for the encoders of pixel decoder.
+            self.label_embedding = nn.ParameterList(
+                [
+                    nn.Parameter(
+                        torch.randn(mask2former_config.feature_size)
+                        * config.initializer_range
+                    )
+                    for _ in range(2)
+                ]
+            )
+
+        self.pixel_decoder = PixelDecoder(config)
         self.mask2former_decoder = Mask2FormerTransformerModule(
             in_features=mask2former_config.feature_size, config=mask2former_config
         )
@@ -302,24 +309,27 @@ class LoupeSegmentor(nn.Module):
         """
         # scale features to the different scales
         backbone_features = self.fpn(features)
-        if pseudo_labels is None and class_labels is not None:
-            # pseudo_labels: (batch_size,)
-            pseudo_labels = torch.tensor(
-                [t.size(0) for t in class_labels], device=features.device
-            )
+        conditional_queries = None
 
-        if pseudo_labels is not None:
-            pseudo_labels = pseudo_labels.unsqueeze(-1)
-            pseudo_queries = (
-                self.label_embedding[1] * pseudo_labels
-                + self.label_embedding[0] * (1 - pseudo_labels)
-            ).unsqueeze(1)
-        else:
-            pseudo_queries = None
-        # pseudo_queries: (batch_size, 1, feature_size)
+        if self.config.enable_conditional_queries:
+            if pseudo_labels is None and class_labels is not None:
+                # pseudo_labels: (batch_size,)
+                pseudo_labels = torch.tensor(
+                    [t.size(0) for t in class_labels], device=features.device
+                )
+
+            if pseudo_labels is not None:
+                pseudo_labels = pseudo_labels.unsqueeze(-1)
+                conditional_queries = (
+                    self.label_embedding[1] * pseudo_labels
+                    + self.label_embedding[0] * (1 - pseudo_labels)
+                ).unsqueeze(1)
+            # conditional_queries: (batch_size, 1, feature_size)
 
         pixel_decoder_output: Mask2FormerPixelDecoderOutput = self.pixel_decoder(
-            backbone_features, pseudo_queries=pseudo_queries, output_hidden_states=False
+            backbone_features,
+            conditional_queries=conditional_queries,
+            output_hidden_states=False,
         )
 
         transformer_module_output: Mask2FormerMaskedAttentionDecoderOutput = (
@@ -425,13 +435,13 @@ class LoupePreTrainedModel(PreTrainedModel):
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p, gain=xavier_std)
 
-        elif isinstance(module, LoupePixelDecoder):
+        elif isinstance(module, PixelDecoder):
             for p in module.parameters():
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p)
             nn.init.normal_(module.level_embed, std=0)
 
-        elif isinstance(module, LoupePixelDecoderConditionedEncoder):
+        elif isinstance(module, PixelDecoderConditionalEncoder):
             for p in module.parameters():
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p)
@@ -620,13 +630,41 @@ class LoupeModel(LoupePreTrainedModel):
             cls_loss = cls_output.loss
             cls_logits = cls_output.logits
             loss_dict["cls"] = {"loss": cls_loss}
-        if "seg" in self.config.stage or "test" in self.config.stage:
-            if self.config.enable_pseudo_labels:
-                assert cls_output is not None
-                pseudo_labels = cls_output.logits.sigmoid()
-            else:
-                pseudo_labels = None
 
+        if self.config.stage == "test" and self.config.enable_conditional_queries:
+            assert cls_output is not None
+            # pseudo_labels: (batch_size, 1) -> (batch_size,)
+            pseudo_labels = cls_output.logits.clone().detach().squeeze(-1).sigmoid()
+            pseudo_patch_labels = (
+                cls_output.patch_logits.clone().detach().squeeze(-1).sigmoid()
+            )
+            mask_labels = []
+            class_labels = []
+            for label, patch_label in zip(pseudo_labels, pseudo_patch_labels):
+                num_patches = self.config.image_size // self.config.patch_size
+                if label > 0.5:
+                    class_labels.append(
+                        torch.tensor([0], dtype=torch.long, device=pseudo_labels.device)
+                    )
+                    mask_labels.append(
+                        patch_label.reshape((1, num_patches, num_patches))
+                    )
+                else:
+                    class_labels.append(
+                        torch.tensor([], dtype=torch.long, device=pseudo_labels.device)
+                    )
+                    mask_labels.append(
+                        torch.empty(
+                            (0, num_patches, num_patches),
+                            dtype=patch_label.dtype,
+                            device=patch_label.device,
+                        )
+                    )
+
+        else:
+            pseudo_labels = None
+
+        if "seg" in self.config.stage or self.config.stage == "test":
             seg_output = self.seg_forward(
                 features=reshape_features(features),
                 pseudo_labels=pseudo_labels,

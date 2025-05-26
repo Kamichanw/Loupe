@@ -41,7 +41,7 @@ class DataModule(pl.LightningDataModule):
             self.validset = validset
 
             # for the 3th stage training, we only use the additional trainset splitted from the validation set
-            if self.cfg.stage.name == "cls_seg":
+            if self.cfg.stage.name in ["cls_seg", "test"]:
                 self.trainset = additional_trainset
             else:
                 self.trainset = dataset["train"]
@@ -57,7 +57,10 @@ class DataModule(pl.LightningDataModule):
 
         return {
             **self.processor(
-                images, masks, self.model_config.enable_patch_cls, return_tensors="pt"
+                images,
+                masks if not getattr(self.cfg.stage, "enable_tta", False) else None,
+                self.model_config.enable_patch_cls,
+                return_tensors="pt",
             ),
             "labels": torch.tensor(labels, dtype=torch.long),  # (N,)
         }

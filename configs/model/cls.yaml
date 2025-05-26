@@ -11,5 +11,5 @@ enable_cls_fusion: True
 freeze_cls: False
 freeze_backbone: True
 
-cls_forge_weight: 0.8
+cls_forge_weight: 0.2
 patch_forge_weight: 0.85

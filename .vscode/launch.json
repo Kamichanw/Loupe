@@ -4,13 +4,31 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        
+
+
         {
             "name": "Debug Training",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/src/train.py",
             "console": "integratedTerminal",
-            "args": ["stage=seg", "fast_dev_run=True", ]
+            "args": [
+                "stage=seg",
+                "fast_dev_run=True",
+            ]
+        },
+        {
+            "name": "Debug Pred",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/infer.py",
+            "console": "integratedTerminal",
+            "args": [
+                "stage=test",
+                "fast_dev_run=True",
+                "stage.pred_output_dir=./pred_outputs"
+            ]
         },
         {
             "name": "Debug Inference",
@@ -18,7 +36,14 @@
             "request": "launch",
             "program": "${workspaceFolder}/src/infer.py",
             "console": "integratedTerminal",
-            "args": ["stage=test", "fast_dev_run=True", "stage.pred_output_dir=./pred_outputs"]
-        }
+            "args": [
+                "stage=test",
+                "fast_dev_run=True",
+                "ckpt.checkpoint_paths=['/gemini/code/loupe/checkpoints/cls_seg-auc=0.9991-f1=0.9544-iou=0.9539.ckpt/model.safetensors']",
+                "data_dir=/gemini/space/jyc/casia2",
+                "hparams.batch_size=40",
+                "stage.enable_tta=true",
+            ]
+        },
     ]
 }

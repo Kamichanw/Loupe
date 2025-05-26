@@ -11,7 +11,7 @@ cls_loss_weight: 2.0
 seg_loss_weight: 1.0
 
 # pseudo labels is typically used for test-time adaptation
-# when enable_pseudo_labels is True, the model will use the prediction of the
+# when enable_conditional_queries is True, the model will use the prediction of the
 # classifier to generate pseudo labels for the segmentation head as additional
 # conditioning
-enable_pseudo_labels: False
+enable_conditional_queries: False

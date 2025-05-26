@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import sys
+import deepspeed
 import hydra
 import torch
 import pytorch_lightning as pl
@@ -15,7 +16,7 @@ from pytorch_lightning.utilities.deepspeed import (
     convert_zero_checkpoint_to_fp32_state_dict,
 )
 from pytorch_lightning.loggers import TensorBoardLogger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 from safetensors.torch import save_file
 
@@ -45,11 +46,12 @@ def convert_deepspeed_checkpoint(cfg: DictConfig):
         checkpoint_callback.best_model_path,
         os.path.join(converted_save_dir, "fp32_state_dict.pth"),
     )
-    ckpt = torch.load(
-        os.path.join(converted_save_dir, "fp32_state_dict.pth"),
-        map_location="cpu",
-        weights_only=True,
-    )
+    with torch.serialization.safe_globals([set]):
+        ckpt = torch.load(
+            os.path.join(converted_save_dir, "fp32_state_dict.pth"),
+            map_location="cpu",
+            weights_only=True,
+        )
     for param in list(ckpt["state_dict"].keys()):
         if getattr(cfg.model, "freeze_backbone", False) and param.startswith(
             "loupe.backbone"
@@ -64,6 +66,11 @@ def convert_deepspeed_checkpoint(cfg: DictConfig):
         ):
             ckpt["state_dict"].pop(param)
     save_file(ckpt["state_dict"], os.path.join(converted_save_dir, "model.safetensors"))
+    OmegaConf.save(config=cfg, f=os.path.join(converted_save_dir, "config.yaml"))
+    OmegaConf.save(
+        config=hydra.core.hydra_config.HydraConfig.get().overrides.task,
+        f=os.path.join(converted_save_dir, "overrides.yaml"),
+    )
     print(f"Model converted to FP32 and saved to {converted_save_dir}.")
 
     os.remove(os.path.join(converted_save_dir, "fp32_state_dict.pth"))

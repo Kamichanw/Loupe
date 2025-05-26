@@ -135,11 +135,11 @@ class ScaleBlock(nn.Module):
         return x
 
 
-class LoupeFeaturePyramid(nn.Module):
+class FeaturePyramid(nn.Module):
 
     def __init__(self, n_channels: int, scales: list[float | int] = None):
         """
-        Initializes the LoupeFeaturePyramid with the given scales.
+        Initializes the FeaturePyramid with the given scales.
 
         Args:
             n_channels (int): The number of channels in the input feature map.
@@ -178,7 +178,7 @@ class LoupeFeaturePyramid(nn.Module):
         return [layer(x) for layer in self.scale_layers]
 
 
-class LoupePixelDecoderEncoderLayer(Mask2FormerPixelDecoderEncoderLayer):
+class PixelDecoderEncoderLayer(Mask2FormerPixelDecoderEncoderLayer):
     def __init__(self, config: LoupeConfig):
         mask2former_config = config.mask2former_config
         super().__init__(mask2former_config)
@@ -193,7 +193,7 @@ class LoupePixelDecoderEncoderLayer(Mask2FormerPixelDecoderEncoderLayer):
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor,
-        pseudo_queries: Optional[torch.Tensor] = None,
+        conditional_queries: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
         reference_points=None,
         spatial_shapes_list=None,
@@ -206,7 +206,7 @@ class LoupePixelDecoderEncoderLayer(Mask2FormerPixelDecoderEncoderLayer):
                 Input to the layer.
             attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`):
                 Attention mask.
-            pseudo_queries (`torch.FloatTensor` of shape `(batch_size, 1, hidden_size)`):
+            conditional_queries (`torch.FloatTensor` of shape `(batch_size, 1, hidden_size)`):
                 Pseudo query for the cross attention, added from Loupe.
             position_embeddings (`torch.FloatTensor`, *optional*):
                 Position embeddings, to be added to `hidden_states`.
@@ -241,11 +241,11 @@ class LoupePixelDecoderEncoderLayer(Mask2FormerPixelDecoderEncoderLayer):
         hidden_states = residual + hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
 
-        if pseudo_queries is not None:
+        if conditional_queries is not None:
             residual = hidden_states
             # Apply cross attention on the pseudo query.
             hidden_states, _ = self.cross_attn(
-                query=pseudo_queries,
+                query=conditional_queries,
                 key=hidden_states,
                 value=hidden_states,
                 key_padding_mask=attention_mask,
@@ -286,14 +286,14 @@ class LoupePixelDecoderEncoderLayer(Mask2FormerPixelDecoderEncoderLayer):
         return outputs
 
 
-class LoupePixelDecoderConditionedEncoder(Mask2FormerPixelDecoderEncoderOnly):
+class PixelDecoderConditionalEncoder(Mask2FormerPixelDecoderEncoderOnly):
     def __init__(self, config: LoupeConfig):
         mask2former_config = config.mask2former_config
         super().__init__(mask2former_config)
         # replace the original encoder layer with our loupe encoder layer
         self.layers = nn.ModuleList(
             [
-                LoupePixelDecoderEncoderLayer(config)
+                PixelDecoderEncoderLayer(config)
                 for _ in range(mask2former_config.encoder_layers)
             ]
         )
@@ -302,7 +302,7 @@ class LoupePixelDecoderConditionedEncoder(Mask2FormerPixelDecoderEncoderOnly):
         self,
         inputs_embeds=None,
         attention_mask=None,
-        pseudo_queries=None,
+        conditional_queries=None,
         position_embeddings=None,
         spatial_shapes_list=None,
         level_start_index=None,
@@ -320,8 +320,8 @@ class LoupePixelDecoderConditionedEncoder(Mask2FormerPixelDecoderEncoderOnly):
                 - 1 for pixel features that are real (i.e. **not masked**),
                 - 0 for pixel features that are padding (i.e. **masked**).
                 [What are attention masks?](../glossary#attention-mask)
-            pseudo_queries (`torch.FloatTensor` of shape `(batch_size, 1, hidden_size)`):
-                Pseudo query for the cross attention, added from Loupe.
+            conditional_queries (`torch.FloatTensor` of shape `(batch_size, 1, hidden_size)`):
+                Conditional query for the cross attention, added from Loupe.
             position_embeddings (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
                 Position embeddings that are added to the queries and keys in each self-attention layer.
             spatial_shapes_list (`list` of `tuple`):
@@ -368,7 +368,7 @@ class LoupePixelDecoderConditionedEncoder(Mask2FormerPixelDecoderEncoderOnly):
             layer_outputs = encoder_layer(
                 hidden_states,
                 attention_mask,
-                pseudo_queries=pseudo_queries,
+                conditional_queries=conditional_queries,
                 position_embeddings=position_embeddings,
                 reference_points=reference_points,
                 spatial_shapes_list=spatial_shapes_list,
@@ -391,19 +391,19 @@ class LoupePixelDecoderConditionedEncoder(Mask2FormerPixelDecoderEncoderOnly):
         )
 
 
-class LoupePixelDecoder(Mask2FormerPixelDecoder):
+class PixelDecoder(Mask2FormerPixelDecoder):
     def __init__(self, config: LoupeConfig):
         mask2former_config = config.mask2former_config
         super().__init__(mask2former_config, config.feature_channels)
 
-        # replace the original encoder with our loupe conditioned encoder
-        self.encoder = LoupePixelDecoderConditionedEncoder(config)
+        # replace the original encoder with our loupe conditional encoder
+        self.encoder = PixelDecoderConditionalEncoder(config)
 
     # modified from transformers.models.mask2former.modeling_mask2former.Mask2FormerPixelDecoder
     def forward(
         self,
         features,
-        pseudo_queries=None,
+        conditional_queries=None,
         encoder_outputs=None,
         output_attentions=None,
         output_hidden_states=None,
@@ -471,7 +471,7 @@ class LoupePixelDecoder(Mask2FormerPixelDecoder):
             encoder_outputs = self.encoder(
                 inputs_embeds=input_embeds_flat,
                 attention_mask=masks_flat,
-                pseudo_queries=pseudo_queries,
+                conditional_queries=conditional_queries,
                 position_embeddings=level_pos_embed_flat,
                 spatial_shapes_list=spatial_shapes_list,
                 level_start_index=level_start_index,
