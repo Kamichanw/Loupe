@@ -47,7 +47,13 @@ class LitModel(pl.LightningModule):
                     "Please use .safetensors, .pt or .pth format."
                 )
             logger.info(f"Loading checkpoint from {ckpt_path}")
-            self.load_state_dict(state_dict=state_dict, strict=False)
+            _, unexpected_keys = self.load_state_dict(
+                state_dict=state_dict, strict=False
+            )
+            if self.global_rank == 0 and unexpected_keys:
+                logger.info(
+                    f"Unexpected keys from checkpoint {ckpt_path}: {unexpected_keys}"
+                )
 
     def forward(
         self,
