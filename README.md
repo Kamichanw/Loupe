@@ -45,7 +45,7 @@ After preprocessing, you will obtain a dataset with three splits: `train`, `vali
 After preparation, the last thing to do is specifying `path/to/your/dataset` in [dataset.yaml](configs/dataset.yaml).
 
 ## How to train
-Loupe employs a three-stage training process. The first stage trains the classifier and can be executed with the following command:
+Loupe employs a two or three stages training process. The first stage trains the classifier and can be executed with the following command:
 
 ```bash
 python src/train.py stage=cls
@@ -65,7 +65,7 @@ After training completes, the best checkpoint will be saved in the directory `./
 
 The second stage trains the segmentation head. To do so, simply replace the command line argument `stage=cls` with `stage=seg` in the stage 1 command.
 
-The third stage jointly trains the backbone, classifier head, and segmentation head. By default, a portion of the validation set is used as training data, while the remainder is reserved for validation. The reason why I use validation set as an extra training set is the test set used in the competition is slightly out-of-distribution (OOD). I found that 
+The third stage is optional, which jointly trains the backbone, classifier head, and segmentation head. By default, a portion of the validation set is used as training data, while the remainder is reserved for validation. The reason why I use validation set as an extra training set is the test set used in the competition is slightly out-of-distribution (OOD). I found that 
 if continue training on the original training set will result in overfitting. However, if you prefer to train the whole network from scratch directly on the training set, you can do so by:
 ```bash
 python src/train.py stage=cls_seg \
