@@ -20,18 +20,18 @@ class DataModule(pl.LightningDataModule):
         self.processor = LoupeImageProcessor(self.model_config)
 
     def setup(self, stage: str) -> None:
-        dataset = load_dataset("parquet", data_dir=self.cfg.data_dir)
+        dataset = load_dataset("parquet", data_dir=self.cfg.dataset.data_dir)
         if stage in [None, "validate", "fit"]:
             validset = dataset["validation"]
-            if isinstance(self.cfg.valid_size, int):
-                assert 0 < self.cfg.valid_size < len(validset)
-                valid_size = self.cfg.valid_size
-            elif isinstance(self.cfg.valid_size, float):
-                assert 0 < self.cfg.valid_size <= 1
-                valid_size = int(self.cfg.valid_size * len(validset))
+            if isinstance(self.cfg.dataset.valid_size, int):
+                assert 0 < self.cfg.dataset.valid_size < len(validset)
+                valid_size = self.cfg.dataset.valid_size
+            elif isinstance(self.cfg.dataset.valid_size, float):
+                assert 0 < self.cfg.dataset.valid_size <= 1
+                valid_size = int(self.cfg.dataset.valid_size * len(validset))
             else:
                 raise ValueError(
-                    f"Invalid valid_size: {self.cfg.valid_size}. It should be either int or float."
+                    f"Invalid valid_size: {self.cfg.dataset.valid_size}. It should be either int or float."
                 )
 
             # use a small subset to prevent too long validation time
@@ -40,11 +40,13 @@ class DataModule(pl.LightningDataModule):
             ).values()
             self.validset = validset
 
-            # for the 3th stage training, we only use the additional trainset splitted from the validation set
-            if self.cfg.stage.name in ["cls_seg", "test"]:
+            if self.cfg.stage.name in ["cls_seg", "test"] and not getattr(
+                self.cfg.stage, "train_on_trainset", False
+            ):
                 self.trainset = additional_trainset
             else:
                 self.trainset = dataset["train"]
+
         elif stage == "test":
             self.testset = dataset["validation"]
         elif stage == "predict":
@@ -69,7 +71,7 @@ class DataModule(pl.LightningDataModule):
         return DataLoader(
             self.trainset,
             batch_size=self.cfg.hparams.batch_size,
-            num_workers=self.cfg.num_workers,
+            num_workers=self.cfg.dataset.num_workers,
             collate_fn=self.train_collate_fn,
             shuffle=True,
         )
@@ -78,7 +80,7 @@ class DataModule(pl.LightningDataModule):
         return DataLoader(
             self.validset,
             batch_size=self.cfg.hparams.batch_size,
-            num_workers=self.cfg.num_workers,
+            num_workers=self.cfg.dataset.num_workers,
             collate_fn=self.test_collate_fn,
             shuffle=False,
         )
@@ -115,7 +117,7 @@ class DataModule(pl.LightningDataModule):
         return DataLoader(
             self.testset,
             batch_size=self.cfg.hparams.batch_size,
-            num_workers=self.cfg.num_workers,
+            num_workers=self.cfg.dataset.num_workers,
             collate_fn=self.test_collate_fn,
         )
 
@@ -139,7 +141,7 @@ class DataModule(pl.LightningDataModule):
         return DataLoader(
             self.testset,
             batch_size=self.cfg.hparams.batch_size,
-            num_workers=self.cfg.num_workers,
+            num_workers=self.cfg.dataset.num_workers,
             collate_fn=self.predict_collate_fn,
             shuffle=False,
         )

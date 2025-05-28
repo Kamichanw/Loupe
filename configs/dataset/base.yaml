@@ -1,0 +1,4 @@
+data_dir: null
+
+num_workers: 8
+valid_size: 0.1 # float between 0 and 1 or int representing the number of samples

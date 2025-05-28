@@ -1,7 +1,7 @@
 defaults:
-  - default
+  - base
   - _self_
 
 batch_size: 96
-lr: 1e-5
+lr: 1e-4
 accumulate_grad_batches: 1

@@ -3,3 +3,4 @@ warmup_step: 0.1
 decay_step: 0.1
 grad_clip_val: 1.0
 scheduler: "wsd" # Options: "cosine" / "wsd"
+epoch: 1

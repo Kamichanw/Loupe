@@ -1,0 +1,6 @@
+defaults:
+  - base
+  - _self_
+
+valid_size: 5000
+data_dir: "/gemini/space/jyc/track1/"

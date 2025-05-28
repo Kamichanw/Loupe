@@ -1,5 +1,5 @@
 defaults:
-  - default
+  - base
   - _self_
 
 weight_decay: 5e-2

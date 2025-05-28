@@ -1,5 +1,5 @@
 defaults:
-  - default
+  - base
   - _self_
 
 checkpoint_paths: ["checkpoints/cls/model.safetensors", "checkpoints/seg-f1=0.8804-iou=0.8866.ckpt/model.safetensors"]

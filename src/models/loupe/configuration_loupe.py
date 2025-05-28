@@ -107,12 +107,6 @@ class LoupeConfig(PretrainedConfig):
         self.enable_conditional_queries = enable_conditional_queries
         self.seg_loss_weight = seg_loss_weight
 
-        if enable_conditional_queries and "cls_seg" not in stage and "test" not in stage:
-            raise ValueError(
-                "enable_conditional_queries can only be True when classification and segmentation are both enabled."
-                "Please set stage to 'cls_seg' or 'test'."
-            )
-
         # remaining configs
         self.hidden_size = self.backbone_config.width
         self.patch_size = self.backbone_config.patch_size

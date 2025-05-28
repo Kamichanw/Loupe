@@ -1,5 +1,5 @@
 defaults:
-  - default
+  - base
   - _self_
 
 fpn_scales: [0.5, 2, 4] # rescale the last hidden states of backbone. for PE-Core-L14-336, rescale to 12x12, 48x48, 96x96
@@ -12,7 +12,11 @@ tversky_alpha: 0.3
 pixel_forge_weight: 0.8
 # epsilon for poly1 focal loss
 pixel_poly_epsilon: 1.0
-# backbone_path: /gemini/code/loupe/checkpoints/cls/model.safetensors # if can also be a path to a cls checkpoint
+
+# conditional_queries is typically used for test-time adaptation
+# during segmentation training, conditional_queries will serve as an
+# extra condition provided for pixel decoder.
+enable_conditional_queries: True
 
 # mask2former overrides, you can set attr to '-' to use default value
 # visit https://huggingface.co/docs/transformers/main/model_doc/mask2former#transformers.Mask2FormerConfig for available overrides

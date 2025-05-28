@@ -1,0 +1,11 @@
+defaults:
+  - base
+  - dataset: ddl
+  - stage: test
+  - model: test
+  - hparams: test
+  - ckpt: test
+  - _self_
+
+trainer:
+  enable_checkpointing: false

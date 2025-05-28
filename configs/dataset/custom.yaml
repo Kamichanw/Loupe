@@ -1,0 +1,5 @@
+defaults:
+  - base
+  - _self_
+
+data_dir: "/gemini/space/jyc/casia2/"

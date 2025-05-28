@@ -47,10 +47,7 @@ class LitModel(pl.LightningModule):
                     "Please use .safetensors, .pt or .pth format."
                 )
             logger.info(f"Loading checkpoint from {ckpt_path}")
-            self.load_state_dict(
-                state_dict=state_dict,
-                strict=False,
-            )
+            self.load_state_dict(state_dict=state_dict, strict=False)
 
     def forward(
         self,
@@ -166,7 +163,7 @@ class LitModel(pl.LightningModule):
             group["params"] is not None for group in optim_groups if "params" in group
         ), "No parameter to optimize."
 
-        if self.cfg.strategy and "deepspeed" in self.cfg.strategy:
+        if "deepspeed" in self.cfg.trainer.get("strategy", ""):
             optimizer = DeepSpeedCPUAdam(
                 optim_groups,
                 weight_decay=self.cfg.hparams.weight_decay,
@@ -281,7 +278,7 @@ class LitModel(pl.LightningModule):
                 }
             )
 
-        if self.cfg.stage.name == "cls_seg":
+        if self.cfg.stage.name in ["cls_seg", "test"]:
             metric_dict["overall"] = (
                 metric_dict["auc"] + metric_dict["iou"] + metric_dict["f1"]
             ) / 3

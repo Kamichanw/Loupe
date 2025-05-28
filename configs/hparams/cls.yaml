@@ -1,11 +1,10 @@
 defaults:
-  - default
+  - base
   - _self_
 
 cls_lr: null # lr for cls head
 backbone_lr: 1e-5 # sometimes we want to finetune backbone with a smaller learning rate
 lr: 5e-4 # default lr for other not specified params
 
-epoch: 1
 batch_size: 48
 accumulate_grad_batches: 8

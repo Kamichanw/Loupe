@@ -182,12 +182,14 @@ class PixelDecoderEncoderLayer(Mask2FormerPixelDecoderEncoderLayer):
     def __init__(self, config: LoupeConfig):
         mask2former_config = config.mask2former_config
         super().__init__(mask2former_config)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=self.embed_dim,
-            num_heads=mask2former_config.num_attention_heads,
-            batch_first=True,
-        )
-        self.cross_attn_layer_norm = nn.LayerNorm(self.embed_dim)
+        
+        if config.enable_conditional_queries:
+            self.cross_attn = nn.MultiheadAttention(
+                embed_dim=self.embed_dim,
+                num_heads=mask2former_config.num_attention_heads,
+                batch_first=True,
+            )
+            self.cross_attn_layer_norm = nn.LayerNorm(self.embed_dim)
 
     def forward(
         self,

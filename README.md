@@ -54,18 +54,25 @@ python src/train.py stage=cls
 During training, two directories will be automatically created:
 
 * `./results/checkpoints` — contains the DeepSpeed-format checkpoint with the highest AUC on the validation set (when using the default training strategy, which can be configured in `./configs/base.yaml`).
-* `./results/logs` — contains logs in TensorBoard format. You can monitor the training progress by running:
+* `./results/{stage.name}` — contains logs in TensorBoard format. You can monitor the training progress by running:
 
 ```bash
-tensorboard --logdir=./results/logs
+tensorboard --logdir=./results/cls
+# or `tensorboard --logdir=./results/seg`, etc.
 ```
 
-After training completes, the best checkpoint will be saved in the directory `./checkpoints/cls-auc=xxx.ckpt`. This directory contains a single file `model.safetensors`, which stores the best checkpoint in the safetensors format.
+After training completes, the best checkpoint will be saved in the directory `./checkpoints/cls-auc=xxx.ckpt`. This directory contains several configs and checkpoint file `model.safetensors` which stores the best checkpoint in the safetensors format.
 
 The second stage trains the segmentation head. To do so, simply replace the command line argument `stage=cls` with `stage=seg` in the stage 1 command.
 
 The third stage jointly trains the backbone, classifier head, and segmentation head. By default, a portion of the validation set is used as training data, while the remainder is reserved for validation. The reason why I use validation set as an extra training set is the test set used in the competition is slightly out-of-distribution (OOD). I found that 
-if continue training on the original training set will result in overfitting.
+if continue training on the original training set will result in overfitting. However, if you prefer to train the whole network from scratch directly on the training set, you can do so by:
+```bash
+python src/train.py stage=cls_seg \
+    ckpt.checkpoint_paths=[] \
+    model.freeze_backbone=true \
+    stage.train_on_trainset=true
+```
 
 All training configurations can be adjusted within the `configs/` directory. Detailed comments are provided to facilitate quick and clear configuration.
 
@@ -88,3 +95,6 @@ python src/infer.py stage=test \
 ```
 
 The classification predictions will be saved in `./pred_outputs/predictions.txt`, and the mask outputs will be stored in `./pred_outputs/masks`. For more details on available parameters, please refer to `configs/stage/test.yaml`.
+
+## Code reading guides
+Nobody cares this work, leave this section blank.

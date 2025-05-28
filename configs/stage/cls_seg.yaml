@@ -1,1 +1,8 @@
 name: cls_seg
+
+# whether to train on the training set. 
+# since the classifier and segmenter are sometimes trained separately, 
+# we default to training on most of the validation set to avoid overfitting. 
+# However, if you prefer to train from scratch directly on the training set, 
+# you can do so by setting this variable to true.
+train_on_trainset: false

@@ -1,0 +1,11 @@
+defaults:
+  - base
+  - dataset: ddl
+  - stage: null # options: "cls" / "seg" / "cls_seg"
+  - model: ${stage}  
+  - hparams: ${stage} 
+  - ckpt: ${stage}
+  - _self_
+
+trainer:
+  enable_checkpointing: true

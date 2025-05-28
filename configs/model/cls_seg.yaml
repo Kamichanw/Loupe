@@ -10,8 +10,7 @@ freeze_seg: False
 cls_loss_weight: 2.0
 seg_loss_weight: 1.0
 
-# pseudo labels is typically used for test-time adaptation
-# when enable_conditional_queries is True, the model will use the prediction of the
-# classifier to generate pseudo labels for the segmentation head as additional
-# conditioning
-enable_conditional_queries: False
+# conditional_queries is typically used for test-time adaptation
+# during segmentation training, conditional_queries will serve as an
+# extra condition provided for pixel decoder.
+enable_conditional_queries: True
