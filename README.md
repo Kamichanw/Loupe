@@ -1,4 +1,10 @@
-# Loupe
+<div align="center">
+<h1>Loupe: A Generalizable and Adaptive Framework for Image Forgery Detection </h1>
+    
+[![arXiv](https://img.shields.io/badge/arXiv-2506.16819-b31b1b.svg)](https://arxiv.org/abs/2506.16819)
+[![Dataset](https://img.shields.io/badge/Dataset-DDL-blue.svg)](https://modelscope.cn/datasets/DDLteam/DDL_dataset/files)
+
+</div>
 
 The 1st place solution of IJCAI 2025 challenge track 1: Forgery Image Detection and Localization. The top 5 final leaderboard is as follows:
 | User | Overall Score |
@@ -98,3 +104,14 @@ The classification predictions will be saved in `./pred_outputs/predictions.txt`
 
 ## Code reading guides
 Nobody cares this work, leave this section blank.
+
+## Citation
+If you find our work useful, please cite with the following latex code:
+```bibtex
+@article{jiang2025loupe,
+  title={Loupe: A Generalizable and Adaptive Framework for Image Forgery Detection},
+  author={Jiang, Yuchu and Chu, Jiaming and Zhao, Jian and Zhang, Xin and Yang, Xu and Jin, Lei and Zhang, Chi and Li, Xuelong},
+  journal={arXiv preprint arXiv:2506.16819},
+  year={2025}
+}
+```
